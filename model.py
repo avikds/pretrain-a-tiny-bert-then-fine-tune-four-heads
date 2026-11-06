@@ -757,3 +757,63 @@ def encoder_block(block, x, pad, n_heads):
 
     return E
 
+# Step 11 - encode
+def encode(params, ids, segs):
+    # Identify padded positions using the PAD token ID.
+    # Shape: (B, T)
+    pad = ids.eq(PAD)
+
+    # Compute the initial token, segment, and positional embeddings.
+    # This is the embedding layer x0.
+    x = embed_inputs(params, ids, segs)
+
+    # Store the embedding output as the first layer representation.
+    hidden_states = [x]
+
+    # Apply each Transformer encoder block sequentially.
+    for block in params["blocks"]:
+        x = encoder_block(
+            block,
+            x,
+            pad,
+            params["n_heads"]
+        )
+
+        # Store the output of every encoder layer.
+        hidden_states.append(x)
+
+    # Return [x0, x1, ..., xL].
+    return hidden_states
+
+
+def encoder_parameters(params):
+    # Begin with the three embedding matrices.
+    parameters = [
+        params["tok"],
+        params["seg"],
+        params["pos"]
+    ]
+
+    # Collect parameters from every encoder block
+    # in the exact order specified by Deep-ML.
+    block_keys = (
+        "qkv",
+        "out",
+        "f1",
+        "b1",
+        "f2",
+        "b2",
+        "g1",
+        "m1",
+        "g2",
+        "m2"
+    )
+
+    for block in params["blocks"]:
+        for key in block_keys:
+            parameters.append(block[key])
+
+    # Return the flat list of trainable encoder tensors.
+    # NSP weights are intentionally excluded.
+    return parameters
+
