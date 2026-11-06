@@ -1123,3 +1123,151 @@ class Adam:
             *self.v
         ]
 
+# Step 17 - pretrain
+from tinygrad import TinyJit, dtypes
+
+
+def lr_at(t, steps, lr, warmup=100):
+    # Linear learning-rate warmup.
+    if t < warmup:
+        return lr * (t + 1) / warmup
+
+    # Linearly decay the learning rate to 5% of its initial value.
+    decay = 1.0 - (t - warmup) / max(1, steps - warmup)
+
+    return lr * (0.05 + 0.95 * decay)
+
+
+def pretrain(params, enc, steps=2000, batch=32, lr=2e-3,
+             k=8, rate=0.25, warmup=100, seed=0, log_every=250):
+
+    if log_every <= 0:
+        raise ValueError("log_every must be positive")
+
+    # ---------------------------------------------------------
+    # 1. Initialize the random generator and Adam optimizer.
+    # ---------------------------------------------------------
+
+    rng = np.random.default_rng(seed)
+
+    # Collect all encoder parameters and NSP classifier parameters.
+    train_params = (
+        encoder_parameters(params)
+        + [params["nsp_w"], params["nsp_b"]]
+    )
+
+    opt = Adam(train_params)
+
+    history = []
+
+    # ---------------------------------------------------------
+    # 2. Define the training step.
+    # ---------------------------------------------------------
+
+    def train_step(x, segs, pos, tgt, w, y, lr_tensor):
+
+        # Run the bidirectional encoder and obtain its final layer.
+        h = encode(params, x, segs)[-1]
+
+        # Compute the masked language modelling loss.
+        mlm = mlm_loss(params, h, pos, tgt, w)
+
+        # Compute the next-sentence prediction loss.
+        nsp = nsp_loss(params, h, y)
+
+        # Combine both objectives.
+        total_loss = mlm + nsp
+
+        # Calculate gradients for all trainable parameters.
+        grads = total_loss.gradient(*train_params)
+
+        # Apply the Adam optimizer using the supplied learning rate.
+        # The same learning rate is used for every parameter.
+        updates = opt.step(
+            grads,
+            [lr_tensor] * len(train_params)
+        )
+
+        # Realize both losses and all optimizer updates together.
+        Tensor.realize(mlm, nsp, *updates)
+
+        return mlm, nsp
+
+    # Compile the training step once using TinyJit.
+    train_step = TinyJit(train_step)
+
+    # ---------------------------------------------------------
+    # 3. Run the self-supervised training loop.
+    # ---------------------------------------------------------
+
+    for t in range(steps):
+
+        # Sample next-sentence prediction examples.
+        ids, segs, y = sample_nsp_batch(
+            enc,
+            rng,
+            batch,
+            params["max_len"]
+        )
+
+        # Apply masked language modelling corruption.
+        x, pos, tgt, w = mask_tokens(
+            ids,
+            rng,
+            params["vocab_size"],
+            k=k,
+            rate=rate
+        )
+
+        # Convert NumPy arrays into tinygrad tensors.
+        x_tensor = Tensor(x, dtype=dtypes.int32)
+        segs_tensor = Tensor(segs, dtype=dtypes.int32)
+        pos_tensor = Tensor(pos, dtype=dtypes.int32)
+        tgt_tensor = Tensor(tgt, dtype=dtypes.int32)
+        w_tensor = Tensor(w, dtype=dtypes.float32)
+        y_tensor = Tensor(y, dtype=dtypes.int32)
+
+        # Calculate the scheduled learning rate.
+        current_lr = lr_at(
+            t,
+            steps,
+            lr,
+            warmup
+        )
+
+        # TinyJit receives the learning rate as a one-element tensor.
+        lr_tensor = Tensor(
+            [current_lr],
+            dtype=dtypes.float32
+        )
+
+        # Perform one optimization step.
+        mlm_value, nsp_value = train_step(
+            x_tensor,
+            segs_tensor,
+            pos_tensor,
+            tgt_tensor,
+            w_tensor,
+            y_tensor,
+            lr_tensor
+        )
+
+        # -----------------------------------------------------
+        # 4. Record training history at the requested intervals.
+        # -----------------------------------------------------
+
+        if t % log_every == 0 or t == steps - 1:
+
+            mlm_score = float(mlm_value.numpy().item())
+            nsp_score = float(nsp_value.numpy().item())
+
+            history.append({
+                "t": t,
+                "mlm": mlm_score,
+                "nsp": nsp_score
+            })
+
+    # Return the training history.
+    # The parameters have already been updated in place.
+    return history
+
