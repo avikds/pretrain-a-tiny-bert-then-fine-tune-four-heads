@@ -944,3 +944,76 @@ def mlm_loss(params, h, pos, tgt, w):
 
     return numerator / denominator
 
+# Step 14 - sample_nsp_batch
+def sample_nsp_batch(enc, rng, batch, max_len=32):
+    # Validate that the corpus contains enough stories and sentences
+    # to generate both positive and negative NSP examples.
+    if batch > 0:
+        if not enc:
+            raise ValueError("enc must contain at least one story.")
+
+        if not any(len(story) >= 2 for story in enc):
+            raise ValueError("At least one story must contain two sentences.")
+
+        if sum(len(story) > 0 for story in enc) < 2:
+            raise ValueError("At least two non-empty stories are required.")
+
+    # Allocate output arrays.
+    ids_batch = np.zeros((batch, max_len), dtype=np.int32)
+    segs_batch = np.zeros((batch, max_len), dtype=np.int32)
+    labels = np.zeros(batch, dtype=np.int32)
+
+    # Generate each NSP example independently.
+    for i in range(batch):
+
+        while True:
+            # Step 1: Randomly select a story.
+            s = int(rng.integers(len(enc)))
+            story = enc[s]
+
+            # The selected story must contain at least two sentences.
+            if len(story) < 2:
+                continue
+
+            # Step 2: Randomly select sentence A.
+            j = int(rng.integers(len(story) - 1))
+
+            A = story[j][0]
+
+            # Step 3: With probability 0.5, select the actual
+            # next sentence from the same story.
+            if rng.random() < 0.5:
+                B = story[j + 1][0]
+                y = 1
+
+            else:
+                # Step 4: Otherwise, select a sentence from
+                # a different story to create a negative example.
+                o = int(rng.integers(len(enc)))
+
+                # Reject the selection if it is the same story
+                # or if the selected story contains no sentences.
+                if o == s or len(enc[o]) == 0:
+                    continue
+
+                other_story = enc[o]
+
+                # Select a random sentence from the other story.
+                other_idx = int(rng.integers(len(other_story)))
+
+                B = other_story[other_idx][0]
+                y = 0
+
+            # A valid sentence pair has been generated.
+            break
+
+        # Step 5: Pack the sentence pair into BERT input format.
+        ids, segs = pack_pair(A, B, max_len=max_len)
+
+        # Store the packed inputs and corresponding NSP label.
+        ids_batch[i] = ids
+        segs_batch[i] = segs
+        labels[i] = y
+
+    return ids_batch, segs_batch, labels
+
