@@ -32,3 +32,19 @@ def split_sentences(text):
 
     return sentences
 
+# Step 2 - load_stories
+import dml_data
+
+_DATA = {}
+
+def load_stories(start=0, stop=1000):
+    # Load and cache TinyStories only once.
+    if "stories" not in _DATA:
+        _DATA["stories"] = dml_data.load("tinystories").stories
+
+    # Select the requested slice of stories.
+    stories = _DATA["stories"][start:stop]
+
+    # Tokenize each story into a list of sentences.
+    return [split_sentences(story) for story in stories]
+

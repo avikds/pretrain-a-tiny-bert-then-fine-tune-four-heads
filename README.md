@@ -11,6 +11,7 @@ python scaffold.py
 ## Steps
 
 - [x] **1.** split_sentences
+- [x] **2.** load_stories
 
 ---
 
