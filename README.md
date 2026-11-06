@@ -25,6 +25,7 @@ python scaffold.py
 - [x] **13.** mlm_loss
 - [x] **14.** sample_nsp_batch
 - [x] **15.** nsp_loss
+- [x] **16.** Adam
 
 ---
 

@@ -1048,3 +1048,78 @@ def nsp_loss(params, h, y):
     # Return the mean cross-entropy loss across the batch.
     return losses.mean()
 
+# Step 16 - Adam
+class Adam:
+    def __init__(self, params, b1=0.9, b2=0.999, eps=1e-8):
+        # Store the trainable parameters.
+        self.params = list(params)
+
+        # Store Adam hyperparameters.
+        self.b1 = b1
+        self.b2 = b2
+        self.eps = eps
+
+        # Initialize first and second moment estimates.
+        # Each state tensor has the same shape as its parameter.
+        self.m = [
+            Tensor.zeros(*p.shape).contiguous().realize()
+            for p in self.params
+        ]
+
+        self.v = [
+            Tensor.zeros(*p.shape).contiguous().realize()
+            for p in self.params
+        ]
+
+        # Initialize the optimization step counter.
+        self.t = Tensor([0.0]).contiguous().realize()
+
+    def reset(self):
+        # Reset the optimization step counter to zero.
+        self.t.assign(self.t * 0).realize()
+
+        # Reset all first and second moment estimates.
+        for m, v in zip(self.m, self.v):
+            m.assign(m * 0).realize()
+            v.assign(v * 0).realize()
+
+    def step(self, grads, lrs):
+        # Increment the optimization step counter.
+        self.t.assign(self.t + 1.0)
+
+        # Update every parameter using its corresponding gradient
+        # and learning rate.
+        for p, g, lr, m, v in zip(
+            self.params, grads, lrs, self.m, self.v
+        ):
+
+            # Update the first moment estimate.
+            m.assign(
+                self.b1 * m + (1.0 - self.b1) * g
+            )
+
+            # Update the second moment estimate.
+            v.assign(
+                self.b2 * v + (1.0 - self.b2) * g * g
+            )
+
+            # Calculate bias-corrected first moment.
+            m_hat = m / (1.0 - self.b1 ** self.t)
+
+            # Calculate bias-corrected second moment.
+            v_hat = v / (1.0 - self.b2 ** self.t)
+
+            # Update the parameter using the Adam rule.
+            p.assign(
+                p - lr * m_hat / (v_hat.sqrt() + self.eps)
+            )
+
+        # Return all optimizer states and parameters.
+        # Do not realize here; the caller handles realization.
+        return [
+            self.t,
+            *self.params,
+            *self.m,
+            *self.v
+        ]
+
