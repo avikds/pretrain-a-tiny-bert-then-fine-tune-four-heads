@@ -22,6 +22,7 @@ python scaffold.py
 - [x] **10.** encoder_block
 - [x] **11.** encode
 - [x] **12.** mask_tokens
+- [x] **13.** mlm_loss
 
 ---
 

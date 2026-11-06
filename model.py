@@ -894,3 +894,53 @@ def mask_tokens(ids, rng, vocab_size, k=5, rate=0.15):
 
     return masked_ids, pos, tgt, w
 
+# Step 13 - mlm_loss
+def mlm_logits(params, h, pos):
+    # Get the batch size, sequence length, and model dimension.
+    B, T, d = h.shape
+
+    # Convert the selected positions into one-hot representations.
+    # Shape: (B, k, T)
+    position_mask = pos.one_hot(T).cast(h.dtype)
+
+    # Select the hidden representations at the masked positions.
+    # Shape: (B, k, d)
+    selected_hidden = position_mask @ h
+
+    # Use the transpose of the token embedding matrix as the
+    # MLM output projection matrix (tied embeddings).
+    # Shape: (B, k, vocab_size)
+    logits = selected_hidden @ params["tok"].permute(1, 0)
+
+    return logits
+
+
+def mlm_loss(params, h, pos, tgt, w):
+    # Compute vocabulary logits for the selected positions.
+    # Shape: (B, k, vocab_size)
+    logits = mlm_logits(params, h, pos)
+
+    # Calculate log probabilities using softmax over the vocabulary.
+    log_probs = logits.log_softmax(axis=-1)
+
+    # Convert target token IDs into one-hot representations.
+    # Shape: (B, k, vocab_size)
+    target_one_hot = tgt.one_hot(
+        params["vocab_size"]
+    ).cast(log_probs.dtype)
+
+    # Calculate the negative log-likelihood for each selected slot.
+    # Shape: (B, k)
+    nll = -(log_probs * target_one_hot).sum(axis=-1)
+
+    # Convert weights to the same floating-point dtype as the loss.
+    weights = w.cast(nll.dtype)
+
+    # Compute the weighted mean negative log-likelihood.
+    numerator = (nll * weights).sum()
+
+    # Avoid division by zero when there are no valid masking slots.
+    denominator = weights.sum().maximum(1.0)
+
+    return numerator / denominator
+
