@@ -344,3 +344,65 @@ def plant_entities(stories, first_names, places, seed=0,
 
     return planted_stories
 
+# Step 5 - build_vocab
+PAD, UNK, CLS, SEP, MASK = 0, 1, 2, 3, 4
+
+SPECIALS = ("[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]")
+
+
+def build_vocab(stories, max_size=1200):
+    # Count the frequency of every token across all stories.
+    counts = Counter()
+
+    for story in stories:
+        for tokens, tags in story:
+            counts.update(tokens)
+
+    # Sort tokens by descending frequency.
+    # For equal frequencies, sort alphabetically.
+    sorted_words = sorted(
+        counts.items(),
+        key=lambda item: (-item[1], item[0])
+    )
+
+    # Reserve the first five positions for BERT special tokens.
+    vocab = {
+        token: index
+        for index, token in enumerate(SPECIALS)
+    }
+
+    # Add the most frequent ordinary words without exceeding max_size.
+    remaining_slots = max(0, max_size - len(SPECIALS))
+
+    for word, count in sorted_words[:remaining_slots]:
+        vocab[word] = len(vocab)
+
+    return vocab
+
+
+def encode_stories(stories, vocab):
+    encoded_stories = []
+
+    # Preserve the original story and sentence nesting.
+    for story in stories:
+        encoded_story = []
+
+        for tokens, tags in story:
+
+            # Convert words into their corresponding vocabulary indices.
+            # Unknown words are mapped to UNK (index 1).
+            ids = np.array(
+                [vocab.get(word, UNK) for word in tokens],
+                dtype=np.int32
+            )
+
+            # Convert the BIO tags into a NumPy integer array.
+            tag_ids = np.array(tags, dtype=np.int32)
+
+            # Store each sentence as a pair of equal-length arrays.
+            encoded_story.append((ids, tag_ids))
+
+        encoded_stories.append(encoded_story)
+
+    return encoded_stories
+

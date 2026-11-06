@@ -14,6 +14,7 @@ python scaffold.py
 - [x] **2.** load_stories
 - [x] **3.** entity_lists
 - [x] **4.** plant_entities
+- [x] **5.** build_vocab
 
 ---
 
