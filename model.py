@@ -817,3 +817,80 @@ def encoder_parameters(params):
     # NSP weights are intentionally excluded.
     return parameters
 
+# Step 12 - mask_tokens
+def mask_tokens(ids, rng, vocab_size, k=5, rate=0.15):
+    # Convert inputs to a NumPy array without modifying the original.
+    ids = np.asarray(ids)
+
+    B, T = ids.shape
+
+    # Create a copy that will contain the corrupted input sequences.
+    masked_ids = ids.copy()
+
+    # Allocate fixed-size arrays for masked positions and targets.
+    # Unused slots are initialized to zero.
+    pos = np.zeros((B, k), dtype=np.int32)
+    tgt = np.zeros((B, k), dtype=np.int32)
+
+    # Weights identify which masking slots contain valid targets.
+    w = np.zeros((B, k), dtype=np.float32)
+
+    # Process each sequence independently.
+    for i in range(B):
+
+        # Only ordinary vocabulary tokens can be selected.
+        # Special tokens have indices 0 through 4.
+        candidates = np.flatnonzero(ids[i] >= 5)
+
+        if len(candidates) == 0 or k == 0 or rate <= 0:
+            continue
+
+        # Determine how many positions to select.
+        # Select at least one when candidates are available,
+        # but never exceed the fixed number of masking slots.
+        n = min(
+            k,
+            max(1, int(round(len(candidates) * rate)))
+        )
+
+        # Randomly select positions without replacement.
+        chosen = rng.choice(
+            candidates,
+            size=n,
+            replace=False
+        )
+
+        # Sort positions to keep the masking slots ordered.
+        chosen.sort()
+
+        # Save the original token positions and targets.
+        pos[i, :n] = chosen
+        tgt[i, :n] = ids[i, chosen]
+
+        # Mark the selected positions as valid.
+        w[i, :n] = 1.0
+
+        # Generate random values for the 80/10/10 strategy.
+        draws = rng.random(n)
+
+        # 80%: Replace the selected token with [MASK].
+        to_mask = draws < 0.80
+        masked_ids[i, chosen[to_mask]] = MASK
+
+        # 10%: Replace the selected token with a random
+        # ordinary vocabulary token.
+        to_random = (draws >= 0.80) & (draws < 0.90)
+
+        num_random = int(to_random.sum())
+
+        if num_random > 0:
+            masked_ids[i, chosen[to_random]] = rng.integers(
+                5,
+                vocab_size,
+                size=num_random
+            )
+
+        # Remaining 10%: Leave the original token unchanged.
+
+    return masked_ids, pos, tgt, w
+

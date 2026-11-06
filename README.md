@@ -21,6 +21,7 @@ python scaffold.py
 - [x] **9.** self_attention
 - [x] **10.** encoder_block
 - [x] **11.** encode
+- [x] **12.** mask_tokens
 
 ---
 
