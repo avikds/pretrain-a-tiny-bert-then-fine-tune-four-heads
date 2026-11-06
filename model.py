@@ -1017,3 +1017,34 @@ def sample_nsp_batch(enc, rng, batch, max_len=32):
 
     return ids_batch, segs_batch, labels
 
+# Step 15 - nsp_loss
+def nsp_logits(params, h):
+    # Extract the [CLS] representation (position 0) from each sequence.
+    # Shape: (B, d_model)
+    cls_output = h[:, 0, :]
+
+    # Apply the NSP linear classification layer.
+    # Shape: (B, 2)
+    logits = cls_output @ params["nsp_w"] + params["nsp_b"]
+
+    return logits
+
+
+def nsp_loss(params, h, y):
+    # Compute NSP classification logits.
+    logits = nsp_logits(params, h)
+
+    # Calculate log probabilities over the two NSP classes.
+    log_probs = logits.log_softmax(axis=-1)
+
+    # Convert integer labels into one-hot representations.
+    # Shape: (B, 2)
+    targets = y.one_hot(2).cast(logits.dtype)
+
+    # Calculate negative log-likelihood for each example.
+    # Shape: (B,)
+    losses = -(log_probs * targets).sum(axis=-1)
+
+    # Return the mean cross-entropy loss across the batch.
+    return losses.mean()
+

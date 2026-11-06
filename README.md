@@ -24,6 +24,7 @@ python scaffold.py
 - [x] **12.** mask_tokens
 - [x] **13.** mlm_loss
 - [x] **14.** sample_nsp_batch
+- [x] **15.** nsp_loss
 
 ---
 
