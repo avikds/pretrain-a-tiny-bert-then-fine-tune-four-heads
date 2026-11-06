@@ -468,3 +468,133 @@ def pack_pair(a, b=None, max_len=32):
         np.array(segs, dtype=np.int32)
     )
 
+# Step 7 - init_params
+import math
+from tinygrad import Tensor
+
+
+def _weight(a):
+    return Tensor(np.asarray(a, dtype=np.float32)).contiguous().realize()
+
+
+def init_params(vocab_size, d_model=64, n_layers=3, n_heads=4,
+                max_len=32, seed=0):
+
+    # Ensure that the model dimension is divisible by the number of heads.
+    if d_model % n_heads != 0:
+        raise ValueError("d_model must be divisible by n_heads")
+
+    # Initialize the random number generator.
+    rng = np.random.default_rng(seed)
+
+    d = d_model
+
+    # ---------------------------------------------------------
+    # 1. Initialize the three embedding matrices.
+    # ---------------------------------------------------------
+
+    tok = _weight(
+        rng.normal(0.0, 0.1, size=(vocab_size, d_model))
+    )
+
+    seg = _weight(
+        rng.normal(0.0, 0.1, size=(2, d_model))
+    )
+
+    pos = _weight(
+        rng.normal(0.0, 0.1, size=(max_len, d_model))
+    )
+
+    # ---------------------------------------------------------
+    # 2. Initialize the Transformer encoder blocks.
+    # ---------------------------------------------------------
+
+    blocks = []
+
+    for _ in range(n_layers):
+
+        block = {
+            # Combined query, key and value projection.
+            "qkv": _weight(
+                rng.normal(
+                    0.0,
+                    math.sqrt(1.0 / d),
+                    size=(d, 3 * d)
+                )
+            ),
+
+            # Attention output projection.
+            "out": _weight(
+                rng.normal(
+                    0.0,
+                    math.sqrt(1.0 / d),
+                    size=(d, d)
+                )
+            ),
+
+            # First feed-forward projection.
+            "f1": _weight(
+                rng.normal(
+                    0.0,
+                    math.sqrt(2.0 / d),
+                    size=(d, 2 * d)
+                )
+            ),
+
+            # Second feed-forward projection.
+            "f2": _weight(
+                rng.normal(
+                    0.0,
+                    math.sqrt(1.0 / (2 * d)),
+                    size=(2 * d, d)
+                )
+            ),
+
+            # Feed-forward biases.
+            "b1": _weight(np.zeros(2 * d)),
+            "b2": _weight(np.zeros(d)),
+
+            # First layer normalization parameters.
+            "g1": _weight(np.ones(d)),
+            "m1": _weight(np.zeros(d)),
+
+            # Second layer normalization parameters.
+            "g2": _weight(np.ones(d)),
+            "m2": _weight(np.zeros(d)),
+        }
+
+        blocks.append(block)
+
+    # ---------------------------------------------------------
+    # 3. Initialize the next-sentence prediction head.
+    # ---------------------------------------------------------
+
+    nsp_w = _weight(
+        rng.normal(
+            0.0,
+            math.sqrt(1.0 / d),
+            size=(d, 2)
+        )
+    )
+
+    nsp_b = _weight(np.zeros(2))
+
+    # ---------------------------------------------------------
+    # 4. Return all parameters and model configuration values.
+    # ---------------------------------------------------------
+
+    return {
+        "tok": tok,
+        "seg": seg,
+        "pos": pos,
+        "blocks": blocks,
+        "nsp_w": nsp_w,
+        "nsp_b": nsp_b,
+
+        "vocab_size": vocab_size,
+        "d_model": d_model,
+        "n_layers": n_layers,
+        "n_heads": n_heads,
+        "max_len": max_len,
+    }
+
