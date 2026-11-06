@@ -1271,3 +1271,208 @@ def pretrain(params, enc, steps=2000, batch=32, lr=2e-3,
     # The parameters have already been updated in place.
     return history
 
+# Step 18 - mlm_metrics
+def encode_all(params, ids, segs, bs=256, layers=False):
+    # Convert inputs to NumPy arrays without modifying the originals.
+    ids = np.asarray(ids, dtype=np.int32)
+    segs = np.asarray(segs, dtype=np.int32)
+
+    # Validate the input dimensions.
+    if ids.ndim != 2 or segs.ndim != 2:
+        raise ValueError("ids and segs must be 2D arrays.")
+
+    if ids.shape != segs.shape:
+        raise ValueError("ids and segs must have identical shapes.")
+
+    if bs <= 0:
+        raise ValueError("bs must be a positive integer.")
+
+    # Get the number of input sequences.
+    N, T = ids.shape
+
+    # Handle an empty input batch.
+    if N == 0:
+        empty = np.empty(
+            (0, T, params["d_model"]),
+            dtype=np.float32
+        )
+
+        if layers:
+            return [
+                empty.copy()
+                for _ in range(params["n_layers"] + 1)
+            ]
+
+        return empty
+
+    # Create storage for the output of each encoder layer.
+    layer_outputs = [
+        []
+        for _ in range(params["n_layers"] + 1)
+    ]
+
+    # Process the input sequences in batches.
+    for start in range(0, N, bs):
+        end = min(start + bs, N)
+
+        # Convert the current NumPy batch into tinygrad tensors.
+        ids_batch = Tensor(ids[start:end])
+        segs_batch = Tensor(segs[start:end])
+
+        # Run the complete encoder.
+        # Returns [x0, x1, ..., xL].
+        hidden_states = encode(
+            params,
+            ids_batch,
+            segs_batch
+        )
+
+        # Convert every layer's output into a NumPy array.
+        # Calling numpy() realizes the computation.
+        for layer_idx, hidden in enumerate(hidden_states):
+            layer_outputs[layer_idx].append(hidden.numpy())
+
+    # Concatenate the batches for each encoder layer.
+    all_layers = [
+        np.concatenate(outputs, axis=0)
+        for outputs in layer_outputs
+    ]
+
+    # Return all layers when requested.
+    if layers:
+        return all_layers
+
+    # Otherwise, return only the final encoder layer.
+    return all_layers[-1]
+
+
+def mlm_metrics(params, enc, n=512, seed=123, k=5, rate=0.15):
+    # Initialize a reproducible random number generator.
+    rng = np.random.default_rng(seed)
+
+    # ---------------------------------------------------------
+    # 1. Generate an evaluation batch.
+    # ---------------------------------------------------------
+
+    ids, segs, y = sample_nsp_batch(
+        enc,
+        rng,
+        n,
+        params["max_len"]
+    )
+
+    # Apply masked language modelling corruption.
+    x, pos, tgt, w = mask_tokens(
+        ids,
+        rng,
+        params["vocab_size"],
+        k=k,
+        rate=rate
+    )
+
+    # ---------------------------------------------------------
+    # 2. Run the encoder.
+    # ---------------------------------------------------------
+
+    # Obtain the final hidden representations as a NumPy array.
+    h_array = encode_all(
+        params,
+        x,
+        segs,
+        layers=False
+    )
+
+    # Convert the final hidden representations into a Tensor.
+    h = Tensor(h_array)
+
+    # ---------------------------------------------------------
+    # 3. Calculate masked language model logits.
+    # ---------------------------------------------------------
+
+    logits = mlm_logits(
+        params,
+        h,
+        Tensor(pos)
+    ).numpy()
+
+    # Identify the valid masking positions.
+    valid = w > 0
+
+    # Extract only the actual prediction targets.
+    targets = tgt[valid]
+
+    if len(targets) > 0:
+
+        # Top-1 accuracy.
+        predictions = logits.argmax(axis=-1)
+
+        top1 = float(
+            np.mean(predictions[valid] == targets)
+        )
+
+        # Top-5 accuracy.
+        vocab_size = params["vocab_size"]
+        top_k = min(5, vocab_size)
+
+        top_indices = np.argsort(
+            logits,
+            axis=-1
+        )[..., -top_k:]
+
+        top5_correct = np.any(
+            top_indices == tgt[..., None],
+            axis=-1
+        )
+
+        top5 = float(
+            np.mean(top5_correct[valid])
+        )
+
+        # Most-common-target baseline.
+        # Always predict the most frequent target in this batch.
+        counts = np.bincount(
+            targets,
+            minlength=vocab_size
+        )
+
+        most_common_id = int(np.argmax(counts))
+
+        most_common = float(
+            np.mean(targets == most_common_id)
+        )
+
+    else:
+        # Handle batches without any valid masked positions.
+        top1 = 0.0
+        top5 = 0.0
+        most_common = 0.0
+
+    # ---------------------------------------------------------
+    # 4. Calculate next-sentence prediction accuracy.
+    # ---------------------------------------------------------
+
+    nsp_scores = nsp_logits(
+        params,
+        h
+    ).numpy()
+
+    nsp_predictions = nsp_scores.argmax(axis=-1)
+
+    if len(y) > 0:
+        nsp = float(
+            np.mean(nsp_predictions == y)
+        )
+    else:
+        nsp = 0.0
+
+    # ---------------------------------------------------------
+    # 5. Return all evaluation metrics as Python floats.
+    # ---------------------------------------------------------
+
+    return {
+        "top1": top1,
+        "top5": top5,
+        "most_common": most_common,
+        "nsp": nsp
+    }
+

@@ -27,6 +27,7 @@ python scaffold.py
 - [x] **15.** nsp_loss
 - [x] **16.** Adam
 - [x] **17.** pretrain
+- [x] **18.** mlm_metrics
 
 ---
 
