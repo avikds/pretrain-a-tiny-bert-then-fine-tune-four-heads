@@ -706,3 +706,54 @@ def self_attention(block, x, pad, n_heads):
 
     return output
 
+# Step 10 - encoder_block
+def layer_norm(x, g, m):
+    # Calculate the mean along the last dimension.
+    # keepdim=True preserves the dimension for broadcasting.
+    mu = x.mean(axis=-1, keepdim=True)
+
+    # Calculate population variance along the last dimension.
+    var = ((x - mu) ** 2).mean(axis=-1, keepdim=True)
+
+    # Normalize and apply the learnable gain and offset.
+    return (x - mu) / (var + 1e-5).sqrt() * g + m
+
+
+def encoder_block(block, x, pad, n_heads):
+    # ---------------------------------------------------------
+    # 1. Multi-head self-attention with residual connection.
+    # ---------------------------------------------------------
+
+    attention_output = self_attention(
+        block, x, pad, n_heads
+    )
+
+    # Add the residual connection and apply first layer norm.
+    Z = layer_norm(
+        attention_output + x,
+        block["g1"],
+        block["m1"]
+    )
+
+    # ---------------------------------------------------------
+    # 2. Position-wise feed-forward network.
+    # ---------------------------------------------------------
+
+    # First linear transformation, bias, and GELU activation.
+    F = (Z @ block["f1"] + block["b1"]).gelu()
+
+    # Second linear transformation and bias.
+    F = F @ block["f2"] + block["b2"]
+
+    # ---------------------------------------------------------
+    # 3. Second residual connection and layer normalization.
+    # ---------------------------------------------------------
+
+    E = layer_norm(
+        F + Z,
+        block["g2"],
+        block["m2"]
+    )
+
+    return E
+

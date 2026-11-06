@@ -19,6 +19,7 @@ python scaffold.py
 - [x] **7.** init_params
 - [x] **8.** embed_inputs
 - [x] **9.** self_attention
+- [x] **10.** encoder_block
 
 ---
 
