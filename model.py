@@ -406,3 +406,65 @@ def encode_stories(stories, vocab):
 
     return encoded_stories
 
+# Step 6 - pack_pair
+def pack_pair(a, b=None, max_len=32):
+    # Convert inputs to lists so the original sequences remain unchanged.
+    a = list(a)
+
+    # Determine whether this is a sentence pair or a single sentence.
+    is_pair = b is not None
+
+    if is_pair:
+        b = list(b)
+
+        # A pair requires at least 3 special-token positions:
+        # [CLS], [SEP], and [SEP].
+        if max_len < 3:
+            raise ValueError("max_len must be at least 3 for a sentence pair.")
+
+        # Truncate the longer sequence until the pair fits.
+        # Remove from sequence A when both have equal length.
+        while len(a) + len(b) + 3 > max_len:
+            if len(a) >= len(b):
+                a.pop()
+            else:
+                b.pop()
+
+        # Construct the BERT input sequence.
+        ids = [CLS] + a + [SEP] + b + [SEP]
+
+        # Segment 0 covers [CLS], A, and the first [SEP].
+        # Segment 1 covers B and the final [SEP].
+        segs = (
+            [0] * (len(a) + 2)
+            + [1] * (len(b) + 1)
+        )
+
+    else:
+        # A single sentence requires [CLS] and [SEP].
+        if max_len < 2:
+            raise ValueError("max_len must be at least 2 for a single sentence.")
+
+        # Keep the first tokens of A that fit.
+        a = a[:max_len - 2]
+
+        # Construct the single-sentence BERT input.
+        ids = [CLS] + a + [SEP]
+
+        # All tokens belong to segment 0.
+        segs = [0] * len(ids)
+
+    # Pad the input IDs with PAD tokens.
+    padding_length = max_len - len(ids)
+
+    ids.extend([PAD] * padding_length)
+
+    # Padding also receives segment ID 0.
+    segs.extend([0] * padding_length)
+
+    # Return fixed-length int32 NumPy arrays.
+    return (
+        np.array(ids, dtype=np.int32),
+        np.array(segs, dtype=np.int32)
+    )
+

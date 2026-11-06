@@ -15,6 +15,7 @@ python scaffold.py
 - [x] **3.** entity_lists
 - [x] **4.** plant_entities
 - [x] **5.** build_vocab
+- [x] **6.** pack_pair
 
 ---
 
