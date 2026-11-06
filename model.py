@@ -598,3 +598,24 @@ def init_params(vocab_size, d_model=64, n_layers=3, n_heads=4,
         "max_len": max_len,
     }
 
+# Step 8 - embed_inputs
+def embed_inputs(params, ids, segs):
+    # Get the batch size and sequence length.
+    batch_size, T = ids.shape
+
+    # Get the model's embedding dimension.
+    d = params["d_model"]
+
+    # Token embeddings: (B, T, d)
+    token_emb = params["tok"][ids]
+
+    # Segment embeddings: (B, T, d)
+    segment_emb = params["seg"][segs]
+
+    # Positional embeddings: (T, d)
+    # Reshape to (1, T, d) for broadcasting across the batch.
+    position_emb = params["pos"][:T].reshape(1, T, d)
+
+    # Combine token, segment, and positional embeddings.
+    return token_emb + segment_emb + position_emb
+

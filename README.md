@@ -17,6 +17,7 @@ python scaffold.py
 - [x] **5.** build_vocab
 - [x] **6.** pack_pair
 - [x] **7.** init_params
+- [x] **8.** embed_inputs
 
 ---
 
