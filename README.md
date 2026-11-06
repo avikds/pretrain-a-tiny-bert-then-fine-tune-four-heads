@@ -12,6 +12,7 @@ python scaffold.py
 
 - [x] **1.** split_sentences
 - [x] **2.** load_stories
+- [x] **3.** entity_lists
 
 ---
 
