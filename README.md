@@ -18,6 +18,7 @@ python scaffold.py
 - [x] **6.** pack_pair
 - [x] **7.** init_params
 - [x] **8.** embed_inputs
+- [x] **9.** self_attention
 
 ---
 

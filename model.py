@@ -619,3 +619,90 @@ def embed_inputs(params, ids, segs):
     # Combine token, segment, and positional embeddings.
     return token_emb + segment_emb + position_emb
 
+# Step 9 - self_attention
+def self_attention(block, x, pad, n_heads):
+    # Input dimensions: B = batch size, T = sequence length, d = model dimension.
+    B, T, d = x.shape
+
+    # Dimension of each attention head.
+    p = d // n_heads
+
+    # ---------------------------------------------------------
+    # 1. Compute the combined Query, Key and Value projections.
+    # ---------------------------------------------------------
+
+    # Shape: (B, T, 3*d)
+    qkv = x @ block["qkv"]
+
+    # Reshape into separate Q, K and V components.
+    # Shape: (B, T, 3, n_heads, p)
+    qkv = qkv.reshape(B, T, 3, n_heads, p)
+
+    # Rearrange dimensions to separate Q, K and V.
+    # Shape: (3, B, n_heads, T, p)
+    qkv = qkv.permute(2, 0, 3, 1, 4)
+
+    # Extract queries, keys and values.
+    # Each has shape: (B, n_heads, T, p)
+    q = qkv[0]
+    k = qkv[1]
+    v = qkv[2]
+
+    # ---------------------------------------------------------
+    # 2. Calculate scaled dot-product attention scores.
+    # ---------------------------------------------------------
+
+    # Transpose the last two dimensions of the keys.
+    # Shape: (B, n_heads, p, T)
+    k_transposed = k.permute(0, 1, 3, 2)
+
+    # Calculate Q multiplied by K transpose.
+    # Shape: (B, n_heads, T, T)
+    scores = q @ k_transposed
+
+    # Scale the attention scores by sqrt(p).
+    scores = scores / math.sqrt(p)
+
+    # ---------------------------------------------------------
+    # 3. Apply the padding mask.
+    # ---------------------------------------------------------
+
+    # Expand the padding mask to broadcast across all heads
+    # and query positions.
+    # Shape: (B, 1, 1, T)
+    pad_mask = pad.reshape(B, 1, 1, T)
+
+    # Assign a large negative score to padded key positions.
+    # This makes their attention probability approximately zero.
+    scores = scores + pad_mask.cast(scores.dtype) * (-1e9)
+
+    # ---------------------------------------------------------
+    # 4. Apply softmax over the key positions.
+    # ---------------------------------------------------------
+
+    # Shape: (B, n_heads, T, T)
+    attn_weights = scores.softmax(axis=-1)
+
+    # Multiply attention weights by the value vectors.
+    # Shape: (B, n_heads, T, p)
+    context = attn_weights @ v
+
+    # ---------------------------------------------------------
+    # 5. Combine the attention heads.
+    # ---------------------------------------------------------
+
+    # Rearrange from (B, n_heads, T, p) to (B, T, n_heads, p).
+    context = context.permute(0, 2, 1, 3)
+
+    # Concatenate all attention heads.
+    # Shape: (B, T, d)
+    context = context.reshape(B, T, d)
+
+    # ---------------------------------------------------------
+    # 6. Apply the final output projection.
+    # ---------------------------------------------------------
+
+    output = context @ block["out"]
+
+    return output
+
