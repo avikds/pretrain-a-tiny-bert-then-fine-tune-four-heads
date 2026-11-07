@@ -1632,3 +1632,169 @@ def future_context_gain(params, enc, n=400, seed=7):
         left_correct / count
     )
 
+# Step 20 - scalar_mix_probe
+def scalar_mix_probe(features, labels, n_classes,
+                     steps=300, lr=0.02, seed=0, batch=256):
+
+    # Convert inputs to NumPy arrays with the required data types.
+    features = np.asarray(features, dtype=np.float32)
+    labels = np.asarray(labels, dtype=np.int32)
+
+    # Get the number of tokens, layers, and feature dimensions.
+    N, M, d = features.shape
+
+    if N == 0:
+        raise ValueError("features must contain at least one example.")
+
+    if len(labels) != N:
+        raise ValueError("features and labels must have equal lengths.")
+
+    if n_classes <= 0 or batch <= 0 or steps < 0:
+        raise ValueError("Invalid n_classes, batch, or steps.")
+
+    if np.any(labels < 0) or np.any(labels >= n_classes):
+        raise ValueError("Labels must be valid class indices.")
+
+    # Initialize the random number generator.
+    rng = np.random.default_rng(seed)
+
+    # ---------------------------------------------------------
+    # 1. Initialize the scalar-mix and classifier parameters.
+    # ---------------------------------------------------------
+
+    # One scalar mixing parameter per encoder layer.
+    a = _weight(np.zeros(M, dtype=np.float32))
+
+    # Linear classifier weights.
+    W = _weight(
+        rng.normal(0.0, 0.01, size=(d, n_classes))
+    )
+
+    # Linear classifier bias.
+    b = _weight(np.zeros(n_classes, dtype=np.float32))
+
+    # Initialize Adam for all three trainable tensors.
+    opt = Adam([a, W, b])
+
+    # Convert the frozen features and labels into tinygrad tensors.
+    features_t = Tensor(features, dtype=dtypes.float32)
+    labels_t = Tensor(labels, dtype=dtypes.int32)
+
+    # ---------------------------------------------------------
+    # 2. Define the TinyJit training step.
+    # ---------------------------------------------------------
+
+    def train_step(idx, lr_tensor):
+
+        # Select the current minibatch.
+        batch_features = features_t[idx]
+        batch_labels = labels_t[idx]
+
+        # Calculate normalized scalar-mix weights.
+        # Shape: (M,)
+        mix_weights = a.softmax(axis=0)
+
+        # Combine the representations from all layers.
+        # Shape: (batch_size, d)
+        mixed_features = (
+            batch_features * mix_weights.reshape(1, M, 1)
+        ).sum(axis=1)
+
+        # Apply the linear classification layer.
+        # Shape: (batch_size, n_classes)
+        logits = mixed_features @ W + b
+
+        # Calculate log probabilities.
+        log_probs = logits.log_softmax(axis=-1)
+
+        # Convert labels into one-hot representations.
+        targets = batch_labels.one_hot(n_classes).cast(logits.dtype)
+
+        # Calculate mean softmax cross-entropy.
+        loss = -(
+            log_probs * targets
+        ).sum(axis=-1).mean()
+
+        # Calculate gradients for scalar-mix and classifier parameters.
+        grads = loss.gradient(a, W, b)
+
+        # Update parameters with Adam.
+        updates = opt.step(
+            grads,
+            [lr_tensor, lr_tensor, lr_tensor]
+        )
+
+        # Realize the loss and optimizer updates.
+        Tensor.realize(loss, *updates)
+
+        return loss
+
+    # Compile the training step using TinyJit.
+    train_step = TinyJit(train_step)
+
+    # ---------------------------------------------------------
+    # 3. Train the scalar-mix probe.
+    # ---------------------------------------------------------
+
+    for t in range(steps):
+
+        # Draw a random minibatch without replacement.
+        batch_size = min(batch, N)
+
+        idx = rng.integers(
+            0, N, size=batch_size
+        )
+
+        # Calculate the scheduled learning rate.
+        current_lr = lr * (1.0 - t / max(1, steps)) + 1e-4
+
+        # Pass indices and learning rate as tensors.
+        idx_t = Tensor(idx, dtype=dtypes.int32)
+
+        lr_tensor = Tensor(
+            [current_lr],
+            dtype=dtypes.float32
+        )
+
+        # Perform one training update.
+        train_step(idx_t, lr_tensor)
+
+    # ---------------------------------------------------------
+    # 4. Return the trained probe parameters.
+    # ---------------------------------------------------------
+
+    return {
+        "weights": a.softmax(axis=0).numpy(),
+        "W": W.numpy(),
+        "b": b.numpy()
+    }
+
+
+def probe_accuracy(features, probe, labels):
+
+    # Convert inputs into NumPy arrays.
+    features = np.asarray(features, dtype=np.float32)
+    labels = np.asarray(labels, dtype=np.int32)
+
+    # Retrieve the learned scalar-mix weights and classifier.
+    weights = np.asarray(probe["weights"])
+    W = np.asarray(probe["W"])
+    b = np.asarray(probe["b"])
+
+    # Combine the representations from all layers.
+    # Shape: (N, d)
+    mixed_features = np.einsum(
+        "m,nmd->nd",
+        weights,
+        features
+    )
+
+    # Calculate class logits.
+    logits = mixed_features @ W + b
+
+    # Select the highest-scoring class.
+    predictions = logits.argmax(axis=-1)
+
+    # Return classification accuracy as a Python float.
+    return float(np.mean(predictions == labels))
+

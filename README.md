@@ -29,6 +29,7 @@ python scaffold.py
 - [x] **17.** pretrain
 - [x] **18.** mlm_metrics
 - [x] **19.** cloze_topk
+- [x] **20.** scalar_mix_probe
 
 ---
 
