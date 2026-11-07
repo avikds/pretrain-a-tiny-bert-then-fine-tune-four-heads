@@ -3074,3 +3074,352 @@ def tag_loss(head, h, tags):
 
     return numerator / denominator
 
+# Step 27 - viterbi_bio
+def bio_to_spans(tags):
+    # Store the extracted entity spans.
+    spans = []
+
+    # Track the currently active entity.
+    current_type = None
+    start = None
+
+    # Helper to close an active entity.
+    def close_span(end):
+        nonlocal current_type, start
+
+        if current_type is not None:
+            spans.append((current_type, start, end))
+
+        current_type = None
+        start = None
+
+    # Process tags from left to right.
+    for i, tag_id in enumerate(tags):
+
+        tag_id = int(tag_id)
+
+        # O: no entity at this position.
+        if tag_id == 0:
+            close_span(i - 1)
+
+        # B-Per: always starts a new person entity.
+        elif tag_id == 1:
+            close_span(i - 1)
+            current_type = "Per"
+            start = i
+
+        # I-Per: continue the current person entity,
+        # or start a new one if no matching entity exists.
+        elif tag_id == 2:
+            if current_type != "Per":
+                close_span(i - 1)
+                current_type = "Per"
+                start = i
+
+        # B-Loc: always starts a new location entity.
+        elif tag_id == 3:
+            close_span(i - 1)
+            current_type = "Loc"
+            start = i
+
+        # I-Loc: continue the current location entity,
+        # or start a new one if no matching entity exists.
+        elif tag_id == 4:
+            if current_type != "Loc":
+                close_span(i - 1)
+                current_type = "Loc"
+                start = i
+
+        else:
+            raise ValueError(f"Invalid BIO tag index: {tag_id}")
+
+    # Close any entity remaining at the end of the sequence.
+    close_span(len(tags) - 1)
+
+    return spans
+
+
+def viterbi_bio(log_probs):
+    # Convert the input into a NumPy float array.
+    log_probs = np.asarray(log_probs, dtype=np.float64)
+
+    # Input shape: (T, 5).
+    if log_probs.ndim != 2 or log_probs.shape[1] != 5:
+        raise ValueError("log_probs must have shape (T, 5).")
+
+    T = len(log_probs)
+
+    # Handle an empty sequence.
+    if T == 0:
+        return []
+
+    # ---------------------------------------------------------
+    # 1. Define the legal BIO transitions.
+    # ---------------------------------------------------------
+
+    # A transition is legal when the current tag can follow
+    # the previous tag.
+    #
+    # Tag 2 (I-Per) can only follow tag 1 or 2.
+    # Tag 4 (I-Loc) can only follow tag 3 or 4.
+    # All other transitions are permitted.
+
+    allowed = np.ones((5, 5), dtype=bool)
+
+    allowed[:, 2] = False
+    allowed[1, 2] = True
+    allowed[2, 2] = True
+
+    allowed[:, 4] = False
+    allowed[3, 4] = True
+    allowed[4, 4] = True
+
+    # ---------------------------------------------------------
+    # 2. Initialize the dynamic programming table.
+    # ---------------------------------------------------------
+
+    dp = np.full((T, 5), -np.inf, dtype=np.float64)
+
+    # Store the best previous tag for every position and tag.
+    back = np.zeros((T, 5), dtype=np.int32)
+
+    # The first tag cannot be I-Per (2) or I-Loc (4).
+    dp[0, [0, 1, 3]] = log_probs[0, [0, 1, 3]]
+
+    # ---------------------------------------------------------
+    # 3. Perform the Viterbi forward pass.
+    # ---------------------------------------------------------
+
+    for t in range(1, T):
+
+        for current_tag in range(5):
+
+            # Consider only legal previous tags.
+            previous_tags = np.flatnonzero(
+                allowed[:, current_tag]
+            )
+
+            # Calculate the candidate scores.
+            scores = (
+                dp[t - 1, previous_tags]
+                + log_probs[t, current_tag]
+            )
+
+            # Select the highest-scoring previous tag.
+            best_idx = int(np.argmax(scores))
+            best_previous = int(previous_tags[best_idx])
+
+            # Save the best score and backpointer.
+            dp[t, current_tag] = scores[best_idx]
+            back[t, current_tag] = best_previous
+
+    # ---------------------------------------------------------
+    # 4. Backtrack to recover the best tag sequence.
+    # ---------------------------------------------------------
+
+    # Select the highest-scoring final tag.
+    last_tag = int(np.argmax(dp[T - 1]))
+
+    # Reconstruct the complete sequence.
+    path = [0] * T
+    path[T - 1] = last_tag
+
+    for t in range(T - 1, 0, -1):
+        path[t - 1] = int(back[t, path[t]])
+
+    return path
+
+
+def span_f1(true_seqs, pred_seqs):
+    # Ensure both collections contain the same number of sequences.
+    if len(true_seqs) != len(pred_seqs):
+        raise ValueError(
+            "true_seqs and pred_seqs must have equal lengths."
+        )
+
+    true_count = 0
+    pred_count = 0
+    true_positive = 0
+
+    # Evaluate entity spans independently within each sequence.
+    for true_tags, pred_tags in zip(true_seqs, pred_seqs):
+
+        # Convert BIO tags into entity spans.
+        true_spans = set(bio_to_spans(true_tags))
+        pred_spans = set(bio_to_spans(pred_tags))
+
+        # Count all true and predicted entities.
+        true_count += len(true_spans)
+        pred_count += len(pred_spans)
+
+        # An entity is correct only when its type, start
+        # and end positions all match.
+        true_positive += len(true_spans & pred_spans)
+
+    # Calculate precision.
+    precision = (
+        true_positive / pred_count
+        if pred_count > 0
+        else 0.0
+    )
+
+    # Calculate recall.
+    recall = (
+        true_positive / true_count
+        if true_count > 0
+        else 0.0
+    )
+
+    # Calculate F1, handling the zero-denominator case.
+    if precision + recall > 0:
+        f1 = (
+            2.0 * precision * recall
+            / (precision + recall)
+        )
+    else:
+        f1 = 0.0
+
+    return (
+        float(f1),
+        float(precision),
+        float(recall)
+    )
+
+
+def tag_f1(params, head, ids, segs, tags):
+    # Convert the target tags into a NumPy array.
+    tags = np.asarray(tags, dtype=np.int32)
+
+    # ---------------------------------------------------------
+    # 1. Encode the input sequences.
+    # ---------------------------------------------------------
+
+    h = encode_all(
+        params,
+        ids,
+        segs,
+        bs=256,
+        layers=False
+    )
+
+    # Convert the final encoder representations into a Tensor.
+    h_tensor = Tensor(h, dtype=dtypes.float32)
+
+    # ---------------------------------------------------------
+    # 2. Calculate tagging logits and log probabilities.
+    # ---------------------------------------------------------
+
+    logits = head(h_tensor)
+
+    log_probs = logits.log_softmax(axis=-1).numpy()
+
+    raw_predictions = logits.numpy().argmax(axis=-1)
+
+    # ---------------------------------------------------------
+    # 3. Remove special tokens and padding.
+    # ---------------------------------------------------------
+
+    valid = tags >= 0
+
+    true_seqs = []
+    viterbi_predictions = []
+    raw_predictions_valid = []
+
+    for i in range(len(tags)):
+
+        # Keep only positions containing actual sentence tags.
+        mask = valid[i]
+
+        true_seq = tags[i, mask]
+        log_prob_seq = log_probs[i, mask]
+        raw_seq = raw_predictions[i, mask]
+
+        # Decode the best legal BIO sequence.
+        decoded_seq = viterbi_bio(log_prob_seq)
+
+        true_seqs.append(true_seq.tolist())
+        viterbi_predictions.append(decoded_seq)
+        raw_predictions_valid.append(raw_seq.tolist())
+
+    # ---------------------------------------------------------
+    # 4. Calculate entity-level F1 for both predictions.
+    # ---------------------------------------------------------
+
+    viterbi_f1, _, _ = span_f1(
+        true_seqs,
+        viterbi_predictions
+    )
+
+    raw_f1, _, _ = span_f1(
+        true_seqs,
+        raw_predictions_valid
+    )
+
+    return float(viterbi_f1), float(raw_f1)
+
+
+def tag_text(params, head, vocab, text):
+    # Tokenize the input text after converting it to lowercase.
+    tokens = TOKEN.findall(text.lower())
+
+    # An empty input produces an empty output.
+    if not tokens:
+        return []
+
+    # Limit the sentence to the number of tokens that fit.
+    max_tokens = params["max_len"] - 2
+    tokens = tokens[:max_tokens]
+
+    # Convert words to vocabulary IDs.
+    # Unknown words receive the UNK token.
+    token_ids = [
+        vocab.get(word, UNK)
+        for word in tokens
+    ]
+
+    # Pack the sentence into BERT input format.
+    ids, segs = pack_pair(
+        token_ids,
+        max_len=params["max_len"]
+    )
+
+    # ---------------------------------------------------------
+    # 1. Encode the sentence.
+    # ---------------------------------------------------------
+
+    h = encode_all(
+        params,
+        ids[None, :],
+        segs[None, :],
+        bs=256,
+        layers=False
+    )
+
+    # ---------------------------------------------------------
+    # 2. Apply the tagging head.
+    # ---------------------------------------------------------
+
+    h_tensor = Tensor(h, dtype=dtypes.float32)
+
+    logits = head(h_tensor)
+
+    log_probs = logits.log_softmax(axis=-1).numpy()[0]
+
+    # ---------------------------------------------------------
+    # 3. Decode only the actual sentence-token positions.
+    # ---------------------------------------------------------
+
+    # Position 0 is [CLS], so sentence tokens begin at position 1.
+    token_log_probs = log_probs[1:len(tokens) + 1]
+
+    predicted_tags = viterbi_bio(token_log_probs)
+
+    # ---------------------------------------------------------
+    # 4. Return tokens with their predicted BIO tag names.
+    # ---------------------------------------------------------
+
+    return [
+        (token, TAGS[tag_id])
+        for token, tag_id in zip(tokens, predicted_tags)
+    ]
+
