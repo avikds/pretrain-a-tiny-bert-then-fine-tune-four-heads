@@ -3424,10 +3424,6 @@ def tag_text(params, head, vocab, text):
     ]
 
 # Step 28 - make_qa
-import numpy as np
-from tinygrad import Tensor
-
-
 def qa_pools(stories, max_tok=12):
     """
     Build two datasets:
