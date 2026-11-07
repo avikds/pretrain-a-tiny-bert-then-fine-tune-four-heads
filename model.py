@@ -3874,6 +3874,8 @@ def qa_accuracy(params, head_s, head_e, ids, segs, start, end):
     return float(correct / B)
 
 # Step 30 - tiny_bert_report
+import time 
+
 # ---------------------------------------------------------
 # DEFAULT TRAINING-LABEL BUDGETS
 # ---------------------------------------------------------
