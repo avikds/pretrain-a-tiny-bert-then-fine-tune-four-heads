@@ -2204,3 +2204,71 @@ def layer_probes(params, vocab, train_stories, test_stories,
         "sense": sense_result
     }
 
+# Step 22 - MLPHead
+class MLPHead:
+    def __init__(self, d, n_out, seed=0):
+        # Initialize a reproducible random number generator.
+        rng = np.random.default_rng(seed)
+
+        # First linear layer: (d, d).
+        self.w1 = _weight(
+            rng.normal(
+                0.0,
+                math.sqrt(2.0 / d),
+                size=(d, d)
+            )
+        )
+
+        # Second linear layer: (d, n_out).
+        self.w2 = _weight(
+            rng.normal(
+                0.0,
+                0.01,
+                size=(d, n_out)
+            )
+        )
+
+        # Initialize biases to zero.
+        self.b1 = _weight(np.zeros(d, dtype=np.float32))
+        self.b2 = _weight(np.zeros(n_out, dtype=np.float32))
+
+    def parameters(self):
+        # Return all trainable head parameters in the required order.
+        return [self.w1, self.b1, self.w2, self.b2]
+
+    def __call__(self, x):
+        # First linear layer followed by GELU.
+        hidden = (x @ self.w1 + self.b1).gelu()
+
+        # Second linear layer produces the output logits.
+        return hidden @ self.w2 + self.b2
+
+
+def snapshot(tensors):
+    # Return independent NumPy copies of all supplied tensors.
+    return [
+        tensor.numpy().copy()
+        for tensor in tensors
+    ]
+
+
+def restore(tensors, arrays):
+    # Ensure that the checkpoint contains the correct number of arrays.
+    if len(tensors) != len(arrays):
+        raise ValueError(
+            "The number of tensors and checkpoint arrays must match."
+        )
+
+    # Restore values into the existing tensors.
+    for tensor, array in zip(tensors, arrays):
+
+        # Convert the checkpoint array to a tinygrad tensor
+        # with the same dtype as the destination tensor.
+        value = Tensor(
+            np.asarray(array, dtype=np.float32),
+            dtype=tensor.dtype
+        )
+
+        # Assign the restored values and realize the update.
+        tensor.assign(value).realize()
+
