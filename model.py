@@ -2272,3 +2272,151 @@ def restore(tensors, arrays):
         # Assign the restored values and realize the update.
         tensor.assign(value).realize()
 
+# Step 23 - FineTuner
+class FineTuner:
+    def __init__(self, params, head_params, loss_fn):
+        # Store the encoder parameters.
+        self.params = params
+
+        # Store the head parameters.
+        self.head_params = list(head_params)
+
+        # Store the task-specific loss function.
+        self.loss_fn = loss_fn
+
+        # Collect all encoder parameters.
+        self.enc_params = encoder_parameters(params)
+
+        # Combine encoder and head parameters.
+        self.all_params = self.enc_params + self.head_params
+
+        # Initialize Adam over all trainable parameters.
+        self.opt = Adam(self.all_params)
+
+        # -----------------------------------------------------
+        # Define the single compiled training step.
+        # -----------------------------------------------------
+
+        def train_step(ids, segs, *args):
+
+            # The final two arguments are the encoder and head
+            # learning-rate tensors.
+            lr_enc_tensor = args[-2]
+            lr_head_tensor = args[-1]
+
+            # All preceding extra arguments belong to the batch.
+            extra = args[:-2]
+
+            # Run the encoder and obtain every hidden layer.
+            layers = encode(
+                self.params,
+                ids,
+                segs
+            )
+
+            # Calculate the task-specific loss.
+            loss = self.loss_fn(layers, *extra)
+
+            # Calculate gradients for all encoder and head parameters.
+            grads = loss.gradient(*self.all_params)
+
+            # Give each encoder parameter its encoder learning rate.
+            # Give each head parameter its head learning rate.
+            learning_rates = (
+                [lr_enc_tensor] * len(self.enc_params)
+                + [lr_head_tensor] * len(self.head_params)
+            )
+
+            # Apply Adam updates.
+            updates = self.opt.step(
+                grads,
+                learning_rates
+            )
+
+            # Realize the loss and all optimizer outputs.
+            Tensor.realize(loss, *updates)
+
+            return loss
+
+        # Compile the training step exactly once.
+        self._train_step = TinyJit(train_step)
+
+    def run(self, batch_fn, steps, lr_enc, lr_head,
+            seed=0, warmup=20):
+
+        if steps <= 0:
+            raise ValueError("steps must be positive.")
+
+        # Initialize the random number generator.
+        rng = np.random.default_rng(seed)
+
+        # Reset Adam's step counter and moment estimates.
+        self.opt.reset()
+
+        last_loss = None
+
+        # -----------------------------------------------------
+        # Run the training loop.
+        # -----------------------------------------------------
+
+        for t in range(steps):
+
+            # Generate the NumPy training batch.
+            # Expected format: (ids, segs, *extra).
+            batch = batch_fn(rng)
+
+            if not isinstance(batch, (tuple, list)) or len(batch) < 2:
+                raise ValueError(
+                    "batch_fn must return (ids, segs, *extra)."
+                )
+
+            # Convert all NumPy batch arrays into tinygrad tensors.
+            batch_tensors = []
+
+            for array in batch:
+                array = np.asarray(array)
+
+                # Use float32 for floating-point batch arrays
+                # and int32 for integer batch arrays.
+                if array.dtype.kind == "f":
+                    array = array.astype(np.float32, copy=False)
+                elif array.dtype.kind in "iu":
+                    array = array.astype(np.int32, copy=False)
+
+                batch_tensors.append(Tensor(array))
+
+            # -------------------------------------------------
+            # Calculate the learning-rate warmup factor.
+            # -------------------------------------------------
+
+            f = lr_at(
+                t,
+                steps,
+                1.0,
+                warmup
+            )
+
+            # Create separate one-element learning-rate tensors.
+            lr_enc_tensor = Tensor(
+                [lr_enc * f],
+                dtype=dtypes.float32
+            )
+
+            lr_head_tensor = Tensor(
+                [lr_head * f],
+                dtype=dtypes.float32
+            )
+
+            # -------------------------------------------------
+            # Execute the compiled training step.
+            # -------------------------------------------------
+
+            last_loss = self._train_step(
+                *batch_tensors,
+                lr_enc_tensor,
+                lr_head_tensor
+            )
+
+        # Return the final loss as a Python float.
+        return float(last_loss.numpy().item())
+

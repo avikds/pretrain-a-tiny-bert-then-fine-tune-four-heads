@@ -32,6 +32,7 @@ python scaffold.py
 - [x] **20.** scalar_mix_probe
 - [x] **21.** layer_probes
 - [x] **22.** MLPHead
+- [x] **23.** FineTuner
 
 ---
 
