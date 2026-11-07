@@ -1477,11 +1477,6 @@ def mlm_metrics(params, enc, n=512, seed=123, k=5, rate=0.15):
     }
 
 # Step 19 - cloze_topk
-import re
-import numpy as np
-from tinygrad import Tensor
-
-
 def cloze_topk(params, vocab, text, topk=5):
     # Split around special markers
     parts = re.split(
