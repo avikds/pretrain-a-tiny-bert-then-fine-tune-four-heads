@@ -2672,3 +2672,260 @@ def cls_accuracy(params, head, ids, segs, y):
     # Calculate classification accuracy.
     return float(np.mean(predictions == y))
 
+# Step 25 - both_person_set
+def both_person_set(stories, n, vocab, seed=0, max_len=32):
+    # Initialize the random number generator.
+    rng = np.random.default_rng(seed)
+
+    # Collect eligible sentences into two groups.
+    person = []
+    none = []
+
+    # ---------------------------------------------------------
+    # 1. Identify person-only and neither-entity sentences.
+    # ---------------------------------------------------------
+
+    for story in stories:
+        for tokens, tags in story:
+
+            # Keep sentences with lengths between 4 and 14.
+            if not (4 <= len(tokens) <= 14):
+                continue
+
+            has_person = 1 in tags
+            has_place = 3 in tags
+
+            # Person-only sentence: contains a person but no place.
+            if has_person and not has_place:
+                person.append(tokens)
+
+            # Neither sentence: contains neither a person nor a place.
+            elif not has_person and not has_place:
+                none.append(tokens)
+
+    # Validate the available sentence pools.
+    if n > 0 and not person:
+        raise ValueError("No eligible person-only sentences found.")
+
+    if n > 1 and not none:
+        raise ValueError("No eligible neither-entity sentences found.")
+
+    # ---------------------------------------------------------
+    # 2. Generate positive and negative sentence pairs.
+    # ---------------------------------------------------------
+
+    all_ids = []
+    all_segs = []
+    all_labels = []
+
+    for i in range(n):
+
+        if i % 2 == 0:
+            # Positive example: both sentences name a person.
+            A = person[int(rng.integers(len(person)))]
+            B = person[int(rng.integers(len(person)))]
+
+            label = 1
+
+        else:
+            # Negative example: randomly choose one of the
+            # three permitted sentence-type combinations.
+            choice = int(rng.integers(3))
+
+            if choice == 0:
+                # Person + Neither.
+                A = person[int(rng.integers(len(person)))]
+                B = none[int(rng.integers(len(none)))]
+
+            elif choice == 1:
+                # Neither + Person.
+                A = none[int(rng.integers(len(none)))]
+                B = person[int(rng.integers(len(person)))]
+
+            else:
+                # Neither + Neither.
+                A = none[int(rng.integers(len(none)))]
+                B = none[int(rng.integers(len(none)))]
+
+            label = 0
+
+        # Convert both sentences into vocabulary IDs.
+        A_ids = [
+            vocab.get(word, UNK)
+            for word in A
+        ]
+
+        B_ids = [
+            vocab.get(word, UNK)
+            for word in B
+        ]
+
+        # Pack the sentence pair into BERT format.
+        ids, segs = pack_pair(
+            A_ids,
+            B_ids,
+            max_len=max_len
+        )
+
+        all_ids.append(ids)
+        all_segs.append(segs)
+        all_labels.append(label)
+
+    # ---------------------------------------------------------
+    # 3. Randomly permute the completed examples.
+    # ---------------------------------------------------------
+
+    if n == 0:
+        return (
+            np.empty((0, max_len), dtype=np.int32),
+            np.empty((0, max_len), dtype=np.int32),
+            np.empty((0,), dtype=np.int32)
+        )
+
+    order = rng.permutation(n)
+
+    return (
+        np.asarray(all_ids, dtype=np.int32)[order],
+        np.asarray(all_segs, dtype=np.int32)[order],
+        np.asarray(all_labels, dtype=np.int32)[order]
+    )
+
+
+def same_story_set(enc, n, seed=0, max_len=32, min_gap=2):
+    # Initialize the random number generator.
+    rng = np.random.default_rng(seed)
+
+    if n < 0:
+        raise ValueError("n must be non-negative.")
+
+    if min_gap < 1:
+        raise ValueError("min_gap must be positive.")
+
+    if n == 0:
+        return (
+            np.empty((0, max_len), dtype=np.int32),
+            np.empty((0, max_len), dtype=np.int32),
+            np.empty((0,), dtype=np.int32)
+        )
+
+    if not enc:
+        raise ValueError("enc must contain at least one story.")
+
+    # At least one story must be long enough to generate positives.
+    if not any(len(story) >= min_gap + 2 for story in enc):
+        raise ValueError("No story has enough sentences for positive pairs.")
+
+    # At least two non-empty stories are required for negative pairs.
+    if n > 1 and sum(bool(story) for story in enc) < 2:
+        raise ValueError("At least two non-empty stories are required.")
+
+    all_ids = []
+    all_segs = []
+    all_labels = []
+
+    # ---------------------------------------------------------
+    # 1. Generate positive and negative sentence pairs.
+    # ---------------------------------------------------------
+
+    for i in range(n):
+
+        while True:
+            # Draw a random story.
+            s = int(rng.integers(len(enc)))
+            story = enc[s]
+
+            # The story must contain enough sentences.
+            if len(story) < min_gap + 2:
+                continue
+
+            # Draw sentence A.
+            a = int(rng.integers(len(story) - min_gap))
+            A = story[a][0]
+
+            if i % 2 == 0:
+                # Positive example:
+                # B must come from the same story and must be
+                # at least min_gap sentences after A.
+
+                b = int(
+                    rng.integers(a + min_gap, len(story))
+                )
+
+                B = story[b][0]
+                label = 1
+
+            else:
+                # Negative example:
+                # B must come from a different story.
+
+                o = int(rng.integers(len(enc)))
+
+                # Reject the same story or an empty story.
+                if o == s or len(enc[o]) == 0:
+                    continue
+
+                other_story = enc[o]
+
+                # Select a random sentence from the other story.
+                b = int(rng.integers(len(other_story)))
+
+                B = other_story[b][0]
+                label = 0
+
+            break
+
+        # Pack the sentence pair.
+        ids, segs = pack_pair(
+            A,
+            B,
+            max_len=max_len
+        )
+
+        all_ids.append(ids)
+        all_segs.append(segs)
+        all_labels.append(label)
+
+    # ---------------------------------------------------------
+    # 2. Randomly permute all generated examples.
+    # ---------------------------------------------------------
+
+    order = rng.permutation(n)
+
+    return (
+        np.asarray(all_ids, dtype=np.int32)[order],
+        np.asarray(all_segs, dtype=np.int32)[order],
+        np.asarray(all_labels, dtype=np.int32)[order]
+    )
+
+
+def nsp_accuracy(params, ids, segs, y):
+    # Convert labels into a NumPy array.
+    y = np.asarray(y, dtype=np.int32)
+
+    if len(y) == 0:
+        raise ValueError("Evaluation dataset must not be empty.")
+
+    # Encode the sentence pairs using the final encoder layer.
+    h = encode_all(
+        params,
+        ids,
+        segs,
+        bs=256,
+        layers=False
+    )
+
+    # Convert the final hidden representations into a Tensor.
+    h_tensor = Tensor(h)
+
+    # Apply the pretrained next-sentence prediction classifier.
+    logits = nsp_logits(
+        params,
+        h_tensor
+    ).numpy()
+
+    # Obtain the predicted NSP labels.
+    predictions = logits.argmax(axis=-1)
+
+    # Return classification accuracy as a Python float.
+    return float(np.mean(predictions == y))
+
