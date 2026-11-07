@@ -1798,3 +1798,409 @@ def probe_accuracy(features, probe, labels):
     # Return classification accuracy as a Python float.
     return float(np.mean(predictions == labels))
 
+# Step 21 - layer_probes
+FUNCTION_WORDS = {
+    "det": ("the", "a", "an", "this", "that", "these", "those", "his", "her", "their", "my", "your", "our", "its"),
+    "pron": ("he", "she", "it", "they", "i", "you", "we", "him", "them", "me", "us"),
+    "prep": ("to", "at", "in", "on", "of", "for", "with", "from", "by", "near", "under", "over", "into"),
+    "conj": ("and", "but", "or", "so", "because", "when", "if", "then"),
+    "aux": ("was", "were", "is", "are", "am", "had", "have", "has", "did", "do", "does", "will", "can", "could", "would"),
+    "punct": (".", ",", "!", "?"),
+}
+
+
+def token_class_set(enc, vocab, n_seq=400, seed=0, max_len=32):
+    # Initialize the random number generator.
+    rng = np.random.default_rng(seed)
+
+    if n_seq < 0:
+        raise ValueError("n_seq must be non-negative.")
+
+    if n_seq == 0:
+        return (
+            np.empty((0, max_len), dtype=np.int32),
+            np.empty((0, max_len), dtype=np.int32),
+            np.empty((0, max_len), dtype=np.int32)
+        )
+
+    if not enc:
+        raise ValueError("enc must contain at least one story.")
+
+    # Map vocabulary IDs to their corresponding function-word classes.
+    # Class 0 is reserved for all other tokens.
+    id_to_class = {}
+
+    for class_idx, words in enumerate(FUNCTION_WORDS.values(), start=1):
+        for word in words:
+            if word in vocab:
+                id_to_class[vocab[word]] = class_idx
+
+    # Verify that at least one eligible sentence exists.
+    has_valid_sentence = any(
+        4 <= len(sentence[0]) <= max_len - 2
+        for story in enc
+        for sentence in story
+    )
+
+    if not has_valid_sentence:
+        raise ValueError("No eligible sentences found in enc.")
+
+    # Allocate the output arrays.
+    ids_batch = np.zeros((n_seq, max_len), dtype=np.int32)
+    segs_batch = np.zeros((n_seq, max_len), dtype=np.int32)
+    labels = np.zeros((n_seq, max_len), dtype=np.int32)
+
+    # Draw sentences independently until n_seq valid examples are collected.
+    for i in range(n_seq):
+
+        while True:
+            # Select a random story.
+            s = int(rng.integers(len(enc)))
+            story = enc[s]
+
+            if len(story) == 0:
+                continue
+
+            # Select a random sentence from that story.
+            j = int(rng.integers(len(story)))
+            sentence = np.asarray(story[j][0], dtype=np.int32)
+
+            # Accept only sentences with the required length.
+            if 4 <= len(sentence) <= max_len - 2:
+                break
+
+        # Pack the sentence as a single BERT input.
+        ids, segs = pack_pair(sentence, max_len=max_len)
+
+        ids_batch[i] = ids
+        segs_batch[i] = segs
+
+        # Assign function-word classes to the original token positions.
+        # Position 0 is [CLS], so sentence positions begin at 1.
+        for p, token_id in enumerate(sentence):
+            labels[i, p + 1] = id_to_class.get(int(token_id), 0)
+
+    return ids_batch, segs_batch, labels
+
+
+def sense_set(stories, vocab, per_word=30, seed=0, max_len=32):
+    # Initialize the random number generator.
+    rng = np.random.default_rng(seed)
+
+    if per_word < 0:
+        raise ValueError("per_word must be non-negative.")
+
+    # Store the selected sentence occurrences and their labels.
+    selected = []
+
+    # Process each surname independently.
+    for surname in SURNAMES:
+
+        # Only consider surnames present in the vocabulary.
+        if surname not in vocab:
+            continue
+
+        positives = []
+        negatives = []
+
+        # Find every occurrence of the surname in the tagged corpus.
+        for story in stories:
+            for tokens, tags in story:
+
+                # Only consider sentences within the required length.
+                if not (4 <= len(tokens) <= max_len - 2):
+                    continue
+
+                # Find every occurrence, including repeated occurrences
+                # within the same sentence.
+                for p, (word, tag) in enumerate(zip(tokens, tags)):
+
+                    if word != surname:
+                        continue
+
+                    occurrence = (tokens, p)
+
+                    # Tag 2: surname is part of a person's name.
+                    if tag == 2:
+                        positives.append(occurrence)
+
+                    # Tag 0: surname is an ordinary word.
+                    elif tag == 0:
+                        negatives.append(occurrence)
+
+        # Shuffle positive and negative examples independently.
+        rng.shuffle(positives)
+        rng.shuffle(negatives)
+
+        # Keep equal numbers of positive and negative examples.
+        m = min(
+            per_word,
+            len(positives),
+            len(negatives)
+        )
+
+        if m == 0:
+            continue
+
+        selected.extend(
+            (occurrence, 1)
+            for occurrence in positives[:m]
+        )
+
+        selected.extend(
+            (occurrence, 0)
+            for occurrence in negatives[:m]
+        )
+
+    # Allocate lists for the packed examples.
+    all_ids = []
+    all_segs = []
+    all_cols = []
+    all_labels = []
+
+    # Pack each selected occurrence into a BERT input.
+    for (tokens, p), label in selected:
+
+        # Convert the sentence into vocabulary IDs.
+        sentence_ids = [
+            vocab.get(word, UNK)
+            for word in tokens
+        ]
+
+        # Pack the sentence independently.
+        ids, segs = pack_pair(
+            sentence_ids,
+            max_len=max_len
+        )
+
+        # Account for the [CLS] token at position 0.
+        packed_col = p + 1
+
+        all_ids.append(ids)
+        all_segs.append(segs)
+        all_cols.append(packed_col)
+        all_labels.append(label)
+
+    # Convert the output collections into NumPy arrays.
+    if len(all_ids) == 0:
+        return (
+            np.empty((0, max_len), dtype=np.int32),
+            np.empty((0, max_len), dtype=np.int32),
+            np.empty((0,), dtype=np.int32),
+            np.empty((0,), dtype=np.int32)
+        )
+
+    return (
+        np.asarray(all_ids, dtype=np.int32),
+        np.asarray(all_segs, dtype=np.int32),
+        np.asarray(all_cols, dtype=np.int32),
+        np.asarray(all_labels, dtype=np.int32)
+    )
+
+
+def layer_probes(params, vocab, train_stories, test_stories,
+                 seed=0, steps=300):
+
+    # Number of encoder layers plus the embedding layer.
+    n_layers = params["n_layers"] + 1
+    d = params["d_model"]
+    max_len = params["max_len"]
+
+    # ---------------------------------------------------------
+    # Helper: extract hidden representations from every layer.
+    # ---------------------------------------------------------
+
+    def extract_layers(ids, segs):
+        # encode_all returns a list of L+1 arrays,
+        # each having shape (N, T, d).
+        hidden_states = encode_all(
+            params,
+            ids,
+            segs,
+            bs=256,
+            layers=True
+        )
+
+        # Stack the layers along axis 2.
+        # Result: (N, T, L+1, d)
+        return np.stack(hidden_states, axis=2)
+
+    # ---------------------------------------------------------
+    # Helper: train and evaluate scalar-mix and single-layer probes.
+    # ---------------------------------------------------------
+
+    def evaluate_task(train_features, train_labels,
+                      test_features, test_labels, n_classes):
+
+        if len(train_labels) == 0 or len(test_labels) == 0:
+            raise ValueError("Probe datasets must not be empty.")
+
+        # Train one probe using all encoder layers.
+        mix_probe = scalar_mix_probe(
+            train_features,
+            train_labels,
+            n_classes,
+            steps=steps,
+            seed=seed
+        )
+
+        # Evaluate the learned scalar mix.
+        mix_acc = probe_accuracy(
+            test_features,
+            mix_probe,
+            test_labels
+        )
+
+        # Train a separate linear probe for every individual layer.
+        layer_acc = []
+
+        for layer_idx in range(n_layers):
+
+            # Select only the current layer.
+            # Shape: (N, 1, d)
+            train_single = train_features[
+                :, layer_idx:layer_idx + 1, :
+            ]
+
+            test_single = test_features[
+                :, layer_idx:layer_idx + 1, :
+            ]
+
+            # Train the single-layer probe using half the steps.
+            single_probe = scalar_mix_probe(
+                train_single,
+                train_labels,
+                n_classes,
+                steps=steps // 2,
+                seed=seed
+            )
+
+            # Evaluate on the corresponding test-layer features.
+            accuracy = probe_accuracy(
+                test_single,
+                single_probe,
+                test_labels
+            )
+
+            layer_acc.append(float(accuracy))
+
+        return {
+            "weights": [
+                float(w) for w in mix_probe["weights"]
+            ],
+            "mix_acc": float(mix_acc),
+            "layer_acc": layer_acc
+        }
+
+    # =========================================================
+    # TASK 1: SYNTACTIC PROBE — CLOSED-CLASS WORD TAGGING
+    # =========================================================
+
+    # Encode the tagged training and testing stories.
+    train_enc = encode_stories(train_stories, vocab)
+    test_enc = encode_stories(test_stories, vocab)
+
+    # Generate syntactic training examples.
+    tr_ids, tr_segs, tr_labels = token_class_set(
+        train_enc,
+        vocab,
+        n_seq=400,
+        seed=seed,
+        max_len=max_len
+    )
+
+    # Generate syntactic testing examples using a separate seed.
+    te_ids, te_segs, te_labels = token_class_set(
+        test_enc,
+        vocab,
+        n_seq=400,
+        seed=seed + 1,
+        max_len=max_len
+    )
+
+    # Extract all layer representations.
+    tr_hidden = extract_layers(tr_ids, tr_segs)
+    te_hidden = extract_layers(te_ids, te_segs)
+
+    # Keep all ordinary vocabulary positions.
+    # Special tokens, padding and UNK are excluded.
+    tr_valid = tr_ids >= 5
+    te_valid = te_ids >= 5
+
+    # Extract token-level features.
+    # Shape: (number of valid tokens, L+1, d)
+    syn_train_features = tr_hidden[tr_valid]
+    syn_test_features = te_hidden[te_valid]
+
+    # Extract corresponding classification labels.
+    syn_train_labels = tr_labels[tr_valid]
+    syn_test_labels = te_labels[te_valid]
+
+    # Train and evaluate the seven-class syntactic probe.
+    syntactic_result = evaluate_task(
+        syn_train_features,
+        syn_train_labels,
+        syn_test_features,
+        syn_test_labels,
+        n_classes=len(FUNCTION_WORDS) + 1
+    )
+
+    # =========================================================
+    # TASK 2: SEMANTIC PROBE — WORD SENSE CLASSIFICATION
+    # =========================================================
+
+    # Generate balanced surname-occurrence training examples.
+    tr_ids, tr_segs, tr_cols, tr_y = sense_set(
+        train_stories,
+        vocab,
+        per_word=30,
+        seed=seed,
+        max_len=max_len
+    )
+
+    # Generate balanced surname-occurrence testing examples.
+    te_ids, te_segs, te_cols, te_y = sense_set(
+        test_stories,
+        vocab,
+        per_word=30,
+        seed=seed + 1,
+        max_len=max_len
+    )
+
+    # Extract hidden representations from every layer.
+    tr_hidden = extract_layers(tr_ids, tr_segs)
+    te_hidden = extract_layers(te_ids, te_segs)
+
+    # Select the representation at each surname occurrence.
+    # Each result has shape: (N, L+1, d).
+    tr_rows = np.arange(len(tr_ids))
+    te_rows = np.arange(len(te_ids))
+
+    sense_train_features = tr_hidden[
+        tr_rows,
+        tr_cols
+    ]
+
+    sense_test_features = te_hidden[
+        te_rows,
+        te_cols
+    ]
+
+    # Train and evaluate the binary semantic probe.
+    sense_result = evaluate_task(
+        sense_train_features,
+        tr_y,
+        sense_test_features,
+        te_y,
+        n_classes=2
+    )
+
+    # ---------------------------------------------------------
+    # Return the results for both tasks.
+    # ---------------------------------------------------------
+
+    return {
+        "syntactic": syntactic_result,
+        "sense": sense_result
+    }
+

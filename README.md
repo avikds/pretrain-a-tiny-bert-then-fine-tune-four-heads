@@ -30,6 +30,7 @@ python scaffold.py
 - [x] **18.** mlm_metrics
 - [x] **19.** cloze_topk
 - [x] **20.** scalar_mix_probe
+- [x] **21.** layer_probes
 
 ---
 
