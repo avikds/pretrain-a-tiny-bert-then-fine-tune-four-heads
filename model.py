@@ -3423,3 +3423,314 @@ def tag_text(params, head, vocab, text):
         for token, tag_id in zip(tokens, predicted_tags)
     ]
 
+# Step 28 - make_qa
+import numpy as np
+from tinygrad import Tensor
+
+
+def qa_pools(stories, max_tok=12):
+    """
+    Build two datasets:
+      pool: sentences with exactly one person and one place.
+      filler: sentences containing no entities.
+    """
+
+    pool = []
+    filler = []
+
+    for story in stories:
+        for tokens, tags in story:
+
+            spans = bio_to_spans(tags)
+
+            if len(tokens) > max_tok:
+                continue
+
+            person_spans = [
+                (entity_type, start, end)
+                for entity_type, start, end in spans
+                if entity_type == "Per"
+            ]
+
+            place_spans = [
+                (entity_type, start, end)
+                for entity_type, start, end in spans
+                if entity_type == "Loc"
+            ]
+
+            # Exactly one person and one location.
+            if len(person_spans) == 1 and len(place_spans) == 1:
+
+                pool.append((
+                    list(tokens),
+                    person_spans[0],
+                    place_spans[0]
+                ))
+
+            # At least three tokens and no entities.
+            elif len(tokens) >= 3 and not spans:
+
+                filler.append(list(tokens))
+
+    return pool, filler
+
+
+def make_qa(pool, filler, vocab, n, seed=0, max_len=32):
+    """
+    Generate question-passage pairs with known answer spans.
+
+    Returns:
+        ids:   (n, max_len) int32
+        segs:  (n, max_len) int32
+        start: (n,) int32
+        end:   (n,) int32
+    """
+
+    rng = np.random.default_rng(seed)
+
+    if n < 0:
+        raise ValueError("n must be non-negative.")
+
+    if max_len < 19:
+        raise ValueError("max_len must be at least 19.")
+
+    if n > 0 and not pool:
+        raise ValueError("pool must contain at least one sentence.")
+
+    if n > 0 and not filler:
+        raise ValueError("filler must contain at least one sentence.")
+
+    all_ids = []
+    all_segs = []
+    all_start = []
+    all_end = []
+
+    for _ in range(n):
+
+        # -------------------------------------------------
+        # 1. Select a pool sentence and a filler sentence.
+        # -------------------------------------------------
+
+        pool_idx = int(rng.integers(len(pool)))
+
+        pool_tokens, person_span, place_span = pool[pool_idx]
+
+        filler_idx = int(rng.integers(len(filler)))
+
+        filler_tokens = list(filler[filler_idx])
+
+        # -------------------------------------------------
+        # 2. Extract the answer spans.
+        # -------------------------------------------------
+
+        # Spans are stored as:
+        # (entity_type, start, end)
+
+        person_type, person_start, person_end = person_span
+        place_type, place_start, place_end = place_span
+
+        if person_type != "Per" or place_type != "Loc":
+            raise ValueError("Invalid person or location span.")
+
+        # Choose a question and its corresponding answer.
+        if rng.random() < 0.5:
+
+            question = ["where", "is", "this", "?"]
+
+            answer_start = place_start
+            answer_end = place_end
+
+        else:
+
+            question = ["who", "is", "here", "?"]
+
+            answer_start = person_start
+            answer_end = person_end
+
+        # -------------------------------------------------
+        # 3. Convert the question to vocabulary IDs.
+        # -------------------------------------------------
+
+        question_ids = [
+            vocab.get(word, UNK)
+            for word in question
+        ]
+
+        # -------------------------------------------------
+        # 4. Build the passage in random sentence order.
+        # -------------------------------------------------
+
+        # Reserve enough space for:
+        # [CLS] question [SEP] passage [SEP]
+
+        passage_capacity = max_len - len(question_ids) - 3
+
+        # Preserve the entire pool sentence because it
+        # contains the answer.
+        if len(pool_tokens) > passage_capacity:
+            raise ValueError(
+                "The pool sentence does not fit in max_len."
+            )
+
+        # Truncate only the filler if necessary.
+        filler_tokens = filler_tokens[
+            :passage_capacity - len(pool_tokens)
+        ]
+
+        if rng.random() < 0.5:
+
+            # Pool sentence followed by filler.
+            passage = list(pool_tokens) + filler_tokens
+
+            pool_offset = 0
+
+        else:
+
+            # Filler sentence followed by pool sentence.
+            passage = filler_tokens + list(pool_tokens)
+
+            pool_offset = len(filler_tokens)
+
+        # -------------------------------------------------
+        # 5. Convert passage words to vocabulary IDs.
+        # -------------------------------------------------
+
+        passage_ids = [
+            vocab.get(word, UNK)
+            for word in passage
+        ]
+
+        # -------------------------------------------------
+        # 6. Pack the question and passage.
+        # -------------------------------------------------
+
+        ids, segs = pack_pair(
+            question_ids,
+            passage_ids,
+            max_len=max_len
+        )
+
+        # -------------------------------------------------
+        # 7. Calculate the answer's packed positions.
+        # -------------------------------------------------
+
+        # Packed format:
+        #
+        # [CLS] question [SEP] passage [SEP] [PAD] ...
+        #
+        # Passage begins after CLS, question and SEP.
+
+        passage_start = len(question_ids) + 2
+
+        # Locate the pool sentence inside the passage.
+        answer_offset = passage_start + pool_offset
+
+        # BIO span indices are inclusive and sentence-relative.
+        start = answer_offset + answer_start
+        end = answer_offset + answer_end
+
+        # Verify that the answer remains inside the passage.
+        if (
+            start < passage_start
+            or end >= passage_start + len(passage)
+            or end >= max_len
+            or start > end
+        ):
+            raise ValueError("Invalid or truncated answer span.")
+
+        all_ids.append(ids)
+        all_segs.append(segs)
+        all_start.append(start)
+        all_end.append(end)
+
+    # -------------------------------------------------
+    # 8. Return the complete dataset.
+    # -------------------------------------------------
+
+    return (
+        np.asarray(all_ids, dtype=np.int32).reshape(n, max_len),
+        np.asarray(all_segs, dtype=np.int32).reshape(n, max_len),
+        np.asarray(all_start, dtype=np.int32),
+        np.asarray(all_end, dtype=np.int32)
+    )
+
+
+def passage_mask(ids, segs):
+    """
+    True only for passage tokens.
+    Excludes SEP and PAD.
+    """
+
+    ids = np.asarray(ids)
+    segs = np.asarray(segs)
+
+    return (
+        (segs == 1)
+        & (ids != SEP)
+        & (ids != PAD)
+    )
+
+
+def qa_loss(head_s, head_e, h, start, end, mask):
+    """
+    Question-answering loss:
+    start-position cross-entropy + end-position cross-entropy.
+    """
+
+    B, T, d = h.shape
+
+    # -------------------------------------------------
+    # 1. Calculate start and end logits.
+    # -------------------------------------------------
+
+    start_logits = head_s(h).reshape(B, T)
+    end_logits = head_e(h).reshape(B, T)
+
+    # -------------------------------------------------
+    # 2. Mask positions outside the passage.
+    # -------------------------------------------------
+
+    mask_float = mask.cast(start_logits.dtype)
+
+    start_logits = (
+        start_logits + (1.0 - mask_float) * (-1e9)
+    )
+
+    end_logits = (
+        end_logits + (1.0 - mask_float) * (-1e9)
+    )
+
+    # -------------------------------------------------
+    # 3. Start-position cross-entropy.
+    # -------------------------------------------------
+
+    start_log_probs = start_logits.log_softmax(axis=-1)
+
+    start_targets = start.one_hot(T).cast(
+        start_log_probs.dtype
+    )
+
+    start_loss = -(
+        start_log_probs * start_targets
+    ).sum(axis=-1).mean()
+
+    # -------------------------------------------------
+    # 4. End-position cross-entropy.
+    # -------------------------------------------------
+
+    end_log_probs = end_logits.log_softmax(axis=-1)
+
+    end_targets = end.one_hot(T).cast(
+        end_log_probs.dtype
+    )
+
+    end_loss = -(
+        end_log_probs * end_targets
+    ).sum(axis=-1).mean()
+
+    # -------------------------------------------------
+    # 5. Combined QA loss.
+    # -------------------------------------------------
+
+    return start_loss + end_loss
+

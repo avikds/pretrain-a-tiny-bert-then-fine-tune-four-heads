@@ -37,6 +37,7 @@ python scaffold.py
 - [x] **25.** both_person_set
 - [x] **26.** tag_set
 - [x] **27.** viterbi_bio
+- [x] **28.** make_qa
 
 ---
 
