@@ -2421,9 +2421,6 @@ class FineTuner:
         return float(last_loss.numpy().item())
 
 # Step 24 - mention_set
-# TOPICS must be included because topic_split() and topic_set()
-# both depend on this dictionary.
-
 TOPICS = {
     "animal": (
         "dog", "cat", "bird", "bear", "rabbit", "bunny",
