@@ -28,6 +28,7 @@ python scaffold.py
 - [x] **16.** Adam
 - [x] **17.** pretrain
 - [x] **18.** mlm_metrics
+- [x] **19.** cloze_topk
 
 ---
 

@@ -1476,3 +1476,164 @@ def mlm_metrics(params, enc, n=512, seed=123, k=5, rate=0.15):
         "nsp": nsp
     }
 
+# Step 19 - cloze_topk
+import re
+import numpy as np
+from tinygrad import Tensor
+
+
+def cloze_topk(params, vocab, text, topk=5):
+    # Split around special markers
+    parts = re.split(
+        r'(\[MASK\]|\[SEP\])',
+        text,
+        flags=re.IGNORECASE
+    )
+
+    a, b = [], []
+    current = a
+    has_sep = False
+    mask_a, mask_b = [], []
+
+    for part in parts:
+        upper = part.upper()
+
+        if upper == "[MASK]":
+            current.append(MASK)
+            if current is a:
+                mask_a.append(len(a) - 1)
+            else:
+                mask_b.append(len(b) - 1)
+
+        elif upper == "[SEP]":
+            current = b
+            has_sep = True
+
+        elif part:
+            tokens = TOKEN.findall(part.lower())
+            current.extend(vocab.get(w, UNK) for w in tokens)
+
+    # Pack inputs
+    ids, segs = pack_pair(
+        a, b if has_sep else None,
+        max_len=params["max_len"]
+    )
+
+    # Determine positions after truncation
+    positions = []
+
+    if has_sep:
+        na = len(a)
+        nb = len(b)
+
+        # Account for truncation performed by pack_pair
+        while 3 + na + nb > params["max_len"]:
+            if na >= nb:
+                na -= 1
+            else:
+                nb -= 1
+
+        positions.extend(
+            1 + p for p in mask_a if p < na
+        )
+
+        positions.extend(
+            na + 3 + p for p in mask_b if p < nb
+        )
+    else:
+        positions.extend(
+            1 + p for p in mask_a
+            if p < params["max_len"] - 2
+        )
+
+    if not positions:
+        return []
+
+    # Encode
+    h = encode_all(
+        params,
+        ids[None, :],
+        segs[None, :]
+    )[0]
+
+    # Tied embeddings
+    E = params["tok"].numpy()
+    words = sorted(vocab, key=vocab.get)
+
+    output = []
+
+    for pos in positions:
+        logits = h[pos] @ E.T
+        best = np.argsort(-logits, kind="stable")[:topk]
+        output.append([words[i] for i in best])
+
+    return output
+
+
+def future_context_gain(params, enc, n=400, seed=7):
+    rng = np.random.default_rng(seed)
+
+    E = params["tok"].numpy()
+    max_len = params["max_len"]
+
+    both_correct = 0
+    left_correct = 0
+    count = 0
+
+    while count < n:
+        s = int(rng.integers(len(enc)))
+        story = enc[s]
+
+        if len(story) == 0:
+            continue
+
+        j = int(rng.integers(len(story)))
+
+        if story[j] is None:
+            continue
+
+        t = np.asarray(story[j][0], dtype=np.int32)
+
+        if not (6 <= len(t) <= max_len - 2):
+            continue
+
+        p = int(rng.integers(2, len(t) - 1))
+
+        if t[p] < 5:
+            continue
+
+        target = int(t[p])
+
+        ids, segs = pack_pair(t, max_len=max_len)
+        pos = p + 1
+
+        x = ids.copy()
+        x[pos] = MASK
+
+        # Full context
+        h = encode_all(
+            params, x[None, :], segs[None, :]
+        )[0]
+
+        pred_both = int(np.argmax(h[pos] @ E.T))
+
+        # Left context only
+        x_left = x.copy()
+        x_left[pos + 1:] = PAD
+
+        h_left = encode_all(
+            params, x_left[None, :], segs[None, :]
+        )[0]
+
+        pred_left = int(np.argmax(h_left[pos] @ E.T))
+
+        both_correct += int(pred_both == target)
+        left_correct += int(pred_left == target)
+
+        count += 1
+
+    return (
+        both_correct / count,
+        left_correct / count
+    )
+
