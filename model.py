@@ -2929,3 +2929,148 @@ def nsp_accuracy(params, ids, segs, y):
     # Return classification accuracy as a Python float.
     return float(np.mean(predictions == y))
 
+# Step 26 - tag_set
+def tag_set(enc, n, seed=0, max_len=32):
+    # Initialize the random number generator.
+    rng = np.random.default_rng(seed)
+
+    if n < 0:
+        raise ValueError("n must be non-negative.")
+
+    # Collect sentences into entity-containing and entity-free groups.
+    with_entities = []
+    without_entities = []
+
+    # ---------------------------------------------------------
+    # 1. Separate eligible sentences into two groups.
+    # ---------------------------------------------------------
+
+    for story in enc:
+        for ids, tags in story:
+
+            # Keep sentences with lengths between 4 and max_len - 2.
+            if not (4 <= len(ids) <= max_len - 2):
+                continue
+
+            # A sentence contains an entity if at least one tag is > 0.
+            if np.any(tags > 0):
+                with_entities.append((ids, tags))
+            else:
+                without_entities.append((ids, tags))
+
+    # ---------------------------------------------------------
+    # 2. Shuffle both groups independently.
+    # ---------------------------------------------------------
+
+    rng.shuffle(with_entities)
+    rng.shuffle(without_entities)
+
+    # ---------------------------------------------------------
+    # 3. Select the required number of examples.
+    # ---------------------------------------------------------
+
+    # Aim for 75% entity-containing sentences.
+    # Do not select more than are available.
+    m = min(int(n * 0.75), len(with_entities))
+
+    # Select m entity-containing sentences.
+    selected_entities = with_entities[:m]
+
+    # Fill the remaining positions with entity-free sentences.
+    remaining = n - m
+    selected_without = without_entities[:remaining]
+
+    # Combine the two groups.
+    selected = selected_entities + selected_without
+
+    # ---------------------------------------------------------
+    # 4. Shuffle the combined selection.
+    # ---------------------------------------------------------
+
+    order = rng.permutation(len(selected))
+    selected = [selected[i] for i in order]
+
+    # ---------------------------------------------------------
+    # 5. Pack sentences and construct their tag arrays.
+    # ---------------------------------------------------------
+
+    all_ids = []
+    all_segs = []
+    all_tags = []
+
+    for sentence_ids, sentence_tags in selected:
+
+        # Pack each sentence independently.
+        ids, segs = pack_pair(
+            sentence_ids,
+            max_len=max_len
+        )
+
+        # Initialize all positions with -1.
+        # -1 means that the position must be ignored by the loss.
+        packed_tags = np.full(
+            max_len,
+            -1,
+            dtype=np.int32
+        )
+
+        # Position 0 is [CLS], so actual sentence tags begin at 1.
+        # The final [SEP] and padding positions remain -1.
+        length = len(sentence_ids)
+
+        packed_tags[1:length + 1] = sentence_tags
+
+        all_ids.append(ids)
+        all_segs.append(segs)
+        all_tags.append(packed_tags)
+
+    # ---------------------------------------------------------
+    # 6. Return fixed-length NumPy arrays.
+    # ---------------------------------------------------------
+
+    if not all_ids:
+        return (
+            np.empty((0, max_len), dtype=np.int32),
+            np.empty((0, max_len), dtype=np.int32),
+            np.empty((0, max_len), dtype=np.int32)
+        )
+
+    return (
+        np.asarray(all_ids, dtype=np.int32),
+        np.asarray(all_segs, dtype=np.int32),
+        np.asarray(all_tags, dtype=np.int32)
+    )
+
+
+def tag_loss(head, h, tags):
+    # Apply the tagging head to every token representation.
+    # h: (B, T, d)
+    # logits: (B, T, 5)
+    logits = head(h)
+
+    # Identify positions containing valid BIO tags.
+    # Special tokens and padding have tag -1.
+    valid = tags >= 0
+
+    # Replace ignored labels with zero temporarily so that
+    # one-hot conversion receives valid class indices.
+    safe_tags = tags.maximum(0)
+
+    # Calculate log probabilities over the five BIO classes.
+    log_probs = logits.log_softmax(axis=-1)
+
+    # Convert target tags into one-hot representations.
+    targets = safe_tags.one_hot(5).cast(logits.dtype)
+
+    # Calculate negative log-likelihood for every position.
+    losses = -(log_probs * targets).sum(axis=-1)
+
+    # Convert the validity mask into floating-point weights.
+    weights = valid.cast(logits.dtype)
+
+    # Calculate the mean loss over valid token positions only.
+    numerator = (losses * weights).sum()
+    denominator = weights.sum().maximum(1.0)
+
+    return numerator / denominator
+

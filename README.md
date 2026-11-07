@@ -35,6 +35,7 @@ python scaffold.py
 - [x] **23.** FineTuner
 - [x] **24.** mention_set
 - [x] **25.** both_person_set
+- [x] **26.** tag_set
 
 ---
 
