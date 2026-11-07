@@ -2420,3 +2420,258 @@ class FineTuner:
         # Return the final loss as a Python float.
         return float(last_loss.numpy().item())
 
+# Step 24 - mention_set
+# TOPICS must be included because topic_split() and topic_set()
+# both depend on this dictionary.
+
+TOPICS = {
+    "animal": (
+        "dog", "cat", "bird", "bear", "rabbit", "bunny",
+        "fish", "frog", "duck", "mouse", "lion", "monkey",
+        "cow", "pig", "horse", "sheep", "squirrel", "owl",
+        "butterfly", "bee", "elephant", "turtle", "deer", "tiger"
+    ),
+
+    "food": (
+        "cake", "apple", "cookie", "cookies", "soup", "bread",
+        "candy", "pie", "banana", "juice", "milk", "carrot",
+        "sandwich", "cheese", "egg", "chocolate", "lemon", "pear",
+        "rice", "corn", "honey", "meat", "orange", "berries"
+    ),
+
+    "thing": (
+        "ball", "doll", "car", "truck", "teddy", "kite",
+        "blocks", "robot", "train", "boat", "plane", "bike",
+        "puzzle", "balloon", "drum", "bus", "rocket", "ship",
+        "wagon", "toys", "shoes", "hat", "dress", "book"
+    ),
+}
+
+
+def mention_set(stories, n, vocab, seed=0, max_len=32):
+    # Initialize the random number generator.
+    rng = np.random.default_rng(seed)
+
+    # Collect sentences separately for each class.
+    # 0 = neither, 1 = person, 2 = place, 3 = both.
+    class_rows = {c: [] for c in range(4)}
+
+    # Collect eligible sentences from the tagged stories.
+    for story in stories:
+        for tokens, tags in story:
+
+            # Keep sentences of length 4 through max_len - 2.
+            if not (4 <= len(tokens) <= max_len - 2):
+                continue
+
+            has_person = 1 in tags
+            has_place = 3 in tags
+
+            # Determine the sentence label.
+            label = int(has_person) + 2 * int(has_place)
+
+            class_rows[label].append(tokens)
+
+    # Sample up to n // 4 sentences from each class.
+    per_class = n // 4
+    selected = []
+
+    for c in range(4):
+        rows = class_rows[c]
+
+        order = rng.permutation(len(rows))
+
+        for idx in order[:per_class]:
+            selected.append((rows[idx], c))
+
+    # Randomly permute all selected examples.
+    order = rng.permutation(len(selected))
+    selected = [selected[i] for i in order]
+
+    all_ids = []
+    all_segs = []
+    all_labels = []
+
+    # Encode and pack each sentence independently.
+    for tokens, label in selected:
+        token_ids = [
+            vocab.get(word, UNK)
+            for word in tokens
+        ]
+
+        ids, segs = pack_pair(
+            token_ids,
+            max_len=max_len
+        )
+
+        all_ids.append(ids)
+        all_segs.append(segs)
+        all_labels.append(label)
+
+    if not all_ids:
+        return (
+            np.empty((0, max_len), dtype=np.int32),
+            np.empty((0, max_len), dtype=np.int32),
+            np.empty((0,), dtype=np.int32)
+        )
+
+    return (
+        np.asarray(all_ids, dtype=np.int32),
+        np.asarray(all_segs, dtype=np.int32),
+        np.asarray(all_labels, dtype=np.int32)
+    )
+
+
+def topic_split():
+    # Preserve the class order: animal, food, thing.
+    categories = list(TOPICS.keys())
+
+    train = {}
+    heldout = {}
+
+    for c, category in enumerate(categories):
+        topic_words = TOPICS[category]
+
+        # Even positions are used for training.
+        train[c] = set(topic_words[::2])
+
+        # Odd positions are reserved for testing.
+        heldout[c] = set(topic_words[1::2])
+
+    return {
+        "train": train,
+        "heldout": heldout
+    }
+
+
+def topic_set(stories, words, n, vocab, seed=0, max_len=32):
+    # Initialize the random number generator.
+    rng = np.random.default_rng(seed)
+
+    categories = list(TOPICS.keys())
+
+    # Map each topic word to its integer class index.
+    topic_to_class = {}
+
+    for c, category in enumerate(categories):
+        for word in TOPICS[category]:
+            topic_to_class[word] = c
+
+    # Collect eligible sentences separately for each class.
+    class_rows = {c: [] for c in range(3)}
+
+    # Examine all tagged stories.
+    for story in stories:
+        for tokens, tags in story:
+
+            # Keep sentences within the required length.
+            if not (4 <= len(tokens) <= max_len - 2):
+                continue
+
+            # Find all topic words appearing in the sentence.
+            found_words = [
+                word for word in tokens
+                if word in topic_to_class
+            ]
+
+            # At least one topic word is required.
+            if not found_words:
+                continue
+
+            # All topic words must belong to exactly one class.
+            present_classes = {
+                topic_to_class[word]
+                for word in found_words
+            }
+
+            if len(present_classes) != 1:
+                continue
+
+            c = next(iter(present_classes))
+
+            # Every topic word must belong to the supplied
+            # training or held-out vocabulary for this class.
+            if not all(word in words[c] for word in found_words):
+                continue
+
+            class_rows[c].append((tokens, c))
+
+    # Take up to n // 3 examples from each class.
+    per_class = n // 3
+    selected = []
+
+    for c in range(3):
+        rows = class_rows[c]
+
+        order = rng.permutation(len(rows))
+
+        for idx in order[:per_class]:
+            selected.append(rows[idx])
+
+    # Permute all selected rows.
+    order = rng.permutation(len(selected))
+    selected = [selected[i] for i in order]
+
+    all_ids = []
+    all_segs = []
+    all_labels = []
+
+    # Pack every selected sentence independently.
+    for tokens, label in selected:
+
+        token_ids = [
+            vocab.get(word, UNK)
+            for word in tokens
+        ]
+
+        ids, segs = pack_pair(
+            token_ids,
+            max_len=max_len
+        )
+
+        all_ids.append(ids)
+        all_segs.append(segs)
+        all_labels.append(label)
+
+    if not all_ids:
+        return (
+            np.empty((0, max_len), dtype=np.int32),
+            np.empty((0, max_len), dtype=np.int32),
+            np.empty((0,), dtype=np.int32)
+        )
+
+    return (
+        np.asarray(all_ids, dtype=np.int32),
+        np.asarray(all_segs, dtype=np.int32),
+        np.asarray(all_labels, dtype=np.int32)
+    )
+
+
+def cls_accuracy(params, head, ids, segs, y):
+    # Convert labels into a NumPy array.
+    y = np.asarray(y, dtype=np.int32)
+
+    if len(y) == 0:
+        raise ValueError("Evaluation dataset must not be empty.")
+
+    # Encode all sequences using the final encoder layer.
+    h = encode_all(
+        params,
+        ids,
+        segs,
+        bs=256,
+        layers=False
+    )
+
+    # Extract the [CLS] representation.
+    cls_features = Tensor(h[:, 0, :])
+
+    # Apply the classification head.
+    logits = head(cls_features)
+
+    # Get predicted class indices.
+    predictions = logits.numpy().argmax(axis=-1)
+
+    # Calculate classification accuracy.
+    return float(np.mean(predictions == y))
+

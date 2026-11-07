@@ -33,6 +33,7 @@ python scaffold.py
 - [x] **21.** layer_probes
 - [x] **22.** MLPHead
 - [x] **23.** FineTuner
+- [x] **24.** mention_set
 
 ---
 
