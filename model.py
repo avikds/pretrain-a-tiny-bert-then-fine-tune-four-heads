@@ -3730,3 +3730,146 @@ def qa_loss(head_s, head_e, h, start, end, mask):
 
     return start_loss + end_loss
 
+# Step 29 - best_span
+def best_span(s, e, mask, max_span=4):
+    # Convert inputs into NumPy arrays.
+    s = np.asarray(s)
+    e = np.asarray(e)
+    mask = np.asarray(mask, dtype=bool)
+
+    # Validate the input dimensions.
+    if s.ndim != 1 or e.ndim != 1 or mask.ndim != 1:
+        raise ValueError("s, e and mask must be 1D arrays.")
+
+    if len(s) != len(e) or len(s) != len(mask):
+        raise ValueError("s, e and mask must have equal lengths.")
+
+    if max_span <= 0:
+        return (0, 0)
+
+    T = len(s)
+
+    # Initialize the best score and answer positions.
+    best_score = -np.inf
+    best_i, best_j = 0, 0
+
+    # ---------------------------------------------------------
+    # Search for the highest-scoring valid answer span.
+    # ---------------------------------------------------------
+
+    # Iterate over possible start positions in ascending order.
+    for i in range(T):
+
+        # The start position must belong to the passage.
+        if not mask[i]:
+            continue
+
+        # Limit the end position to the maximum answer length.
+        end_limit = min(T, i + max_span)
+
+        # Iterate over valid end positions in ascending order.
+        for j in range(i, end_limit):
+
+            # The end position must also belong to the passage.
+            if not mask[j]:
+                continue
+
+            # Calculate the combined start and end score.
+            score = float(s[i]) + float(e[j])
+
+            # Update only when the score is strictly greater.
+            # This preserves the earliest i, then earliest j,
+            # when multiple spans have equal scores.
+            if score > best_score:
+                best_score = score
+                best_i = i
+                best_j = j
+
+    # Return (0, 0) if no valid answer span exists.
+    if best_score == -np.inf:
+        return (0, 0)
+
+    return (int(best_i), int(best_j))
+
+
+def qa_accuracy(params, head_s, head_e, ids, segs, start, end):
+    # Convert the input arrays into NumPy arrays.
+    ids = np.asarray(ids, dtype=np.int32)
+    segs = np.asarray(segs, dtype=np.int32)
+    start = np.asarray(start, dtype=np.int32)
+    end = np.asarray(end, dtype=np.int32)
+
+    # Validate the batch dimensions.
+    if ids.ndim != 2 or segs.ndim != 2:
+        raise ValueError("ids and segs must be 2D arrays.")
+
+    if ids.shape != segs.shape:
+        raise ValueError("ids and segs must have identical shapes.")
+
+    if start.shape != (len(ids),) or end.shape != (len(ids),):
+        raise ValueError("start and end must have shape (B,).")
+
+    if len(ids) == 0:
+        return 0.0
+
+    # ---------------------------------------------------------
+    # 1. Encode the question-passage pairs.
+    # ---------------------------------------------------------
+
+    h = encode_all(
+        params,
+        ids,
+        segs,
+        bs=256,
+        layers=False
+    )
+
+    # Convert the final encoder representations into a Tensor.
+    h_tensor = Tensor(h)
+
+    # Get the batch size and sequence length.
+    B, T, d = h.shape
+
+    # ---------------------------------------------------------
+    # 2. Calculate start and end position scores.
+    # ---------------------------------------------------------
+
+    # Each head produces one score for every sequence position.
+    start_logits = head_s(h_tensor).reshape(B, T).numpy()
+
+    end_logits = head_e(h_tensor).reshape(B, T).numpy()
+
+    # ---------------------------------------------------------
+    # 3. Identify valid passage positions.
+    # ---------------------------------------------------------
+
+    mask = passage_mask(ids, segs)
+
+    # ---------------------------------------------------------
+    # 4. Decode the best answer span for each example.
+    # ---------------------------------------------------------
+
+    correct = 0
+
+    for i in range(B):
+
+        predicted_start, predicted_end = best_span(
+            start_logits[i],
+            end_logits[i],
+            mask[i]
+        )
+
+        # Exact-span evaluation:
+        # Both the predicted start and end must match.
+        if (
+            predicted_start == int(start[i])
+            and predicted_end == int(end[i])
+        ):
+            correct += 1
+
+    # ---------------------------------------------------------
+    # 5. Return exact-span accuracy.
+    # ---------------------------------------------------------
+
+    return float(correct / B)
+

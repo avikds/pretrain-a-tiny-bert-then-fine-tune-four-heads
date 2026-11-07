@@ -38,6 +38,7 @@ python scaffold.py
 - [x] **26.** tag_set
 - [x] **27.** viterbi_bio
 - [x] **28.** make_qa
+- [x] **29.** best_span
 
 ---
 
