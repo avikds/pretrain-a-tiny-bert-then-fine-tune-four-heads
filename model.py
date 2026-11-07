@@ -3873,3 +3873,937 @@ def qa_accuracy(params, head_s, head_e, ids, segs, start, end):
 
     return float(correct / B)
 
+# Step 30 - tiny_bert_report
+import time
+import numpy as np
+from tinygrad import Tensor
+
+
+# ---------------------------------------------------------
+# DEFAULT TRAINING-LABEL BUDGETS
+# ---------------------------------------------------------
+
+DEFAULT_BUDGETS = {
+    "mention": (128,),
+    "topic": (128,),
+    "both_person": (256,),
+    "same_story": (),
+    "tag": (128,),
+    "qa": (128,)
+}
+
+
+# ---------------------------------------------------------
+# DEFAULT TRAINING CONDITIONS
+# ---------------------------------------------------------
+
+DEFAULT_CONDITIONS = {
+    "mention": ("scratch", "fine"),
+    "topic": ("scratch", "fine"),
+    "both_person": ("scratch", "fine"),
+    "same_story": ("scratch", "fine"),
+    "tag": ("scratch", "frozen", "fine"),
+    "qa": ("scratch", "frozen", "fine")
+}
+
+
+# ---------------------------------------------------------
+# COMPARE TRAINING CONDITIONS
+# ---------------------------------------------------------
+
+def compare_conditions(
+    tuner, weights, pre_state, rand_state,
+    head_params, head_state, arrays, budgets, evaluate,
+    conditions=("scratch", "frozen", "fine"),
+    steps=150, batch=32, lr_enc=5e-4,
+    lr_head=1e-3, seed=0
+):
+
+    results = {}
+
+    arrays = tuple(np.asarray(a) for a in arrays)
+
+    if not arrays:
+        raise ValueError("arrays must contain training data.")
+
+    n_available = len(arrays[0])
+
+    if any(len(a) != n_available for a in arrays):
+        raise ValueError("All training arrays must have equal lengths.")
+
+    if batch <= 0:
+        raise ValueError("batch must be positive.")
+
+    for n in budgets:
+
+        n = int(n)
+
+        if n <= 0:
+            continue
+
+        limit = min(n, n_available)
+
+        if limit == 0:
+            continue
+
+        results[n] = {}
+
+        def batch_fn(rng):
+            idx = rng.integers(
+                0,
+                limit,
+                size=batch
+            )
+            return tuple(a[idx] for a in arrays)
+
+        for condition in conditions:
+
+            if condition == "scratch":
+                restore(weights, rand_state)
+                encoder_lr = lr_head
+
+            elif condition == "frozen":
+                restore(weights, pre_state)
+                encoder_lr = 0.0
+
+            elif condition == "fine":
+                restore(weights, pre_state)
+                encoder_lr = lr_enc
+
+            else:
+                raise ValueError(
+                    f"Unknown training condition: {condition}"
+                )
+
+            restore(head_params, head_state)
+
+            tuner.run(
+                batch_fn,
+                steps,
+                encoder_lr,
+                lr_head,
+                seed=seed
+            )
+
+            results[n][condition] = evaluate()
+
+    return results
+
+
+# ---------------------------------------------------------
+# NEAREST WORDS
+# ---------------------------------------------------------
+
+def nearest_words(params, vocab, word, k=6):
+
+    if k <= 0 or word not in vocab:
+        return []
+
+    E = params["tok"].numpy()
+
+    word_idx = vocab[word]
+
+    if word_idx < 5 or word_idx >= len(E):
+        return []
+
+    norms = np.linalg.norm(E, axis=1)
+
+    denominator = norms * norms[word_idx] + 1e-12
+
+    similarities = (
+        E @ E[word_idx]
+    ) / denominator
+
+    # Exclude special tokens and the word itself.
+    similarities[:5] = -np.inf
+    similarities[word_idx] = -np.inf
+
+    order = np.argsort(-similarities, kind="stable")
+
+    id_to_word = {
+        idx: token
+        for token, idx in vocab.items()
+    }
+
+    results = []
+
+    for idx in order:
+
+        if not np.isfinite(similarities[idx]):
+            continue
+
+        if idx in id_to_word:
+            results.append(id_to_word[idx])
+
+        if len(results) >= k:
+            break
+
+    return results
+
+
+# ---------------------------------------------------------
+# MAIN TINY BERT REPORT
+# ---------------------------------------------------------
+
+def tiny_bert_report(
+    seed=0,
+    vocab_size=1200,
+    n_names=100,
+    d_model=64,
+    n_layers=3,
+    n_heads=4,
+    max_len=32,
+    stories=(6000, 2000, 2000),
+    pretrain_steps=2000,
+    finetune_steps=150,
+    probe_steps=300,
+    budgets=None,
+    conditions=None
+):
+
+    # =====================================================
+    # 0. VALIDATE CONFIGURATION
+    # =====================================================
+
+    if len(stories) != 3:
+        raise ValueError(
+            "stories must contain pretraining, training and test sizes."
+        )
+
+    n_pre, n_train, n_test = map(int, stories)
+
+    if min(n_pre, n_train, n_test) <= 0:
+        raise ValueError("All story-slice sizes must be positive.")
+
+    if pretrain_steps <= 0 or finetune_steps <= 0:
+        raise ValueError("Training steps must be positive.")
+
+    if max_len < 19:
+        raise ValueError(
+            "max_len must be at least 19 for the QA dataset."
+        )
+
+    seconds = {}
+
+    # =====================================================
+    # 1. PREPARE CORPUS AND ENTITY SPLITS
+    # =====================================================
+
+    block_start = time.perf_counter()
+
+    entities = entity_lists(
+        k=n_names,
+        seed=seed + 101
+    )
+
+    all_names, all_places = entities["all"]
+    train_names, train_places = entities["train"]
+    heldout_names, heldout_places = entities["heldout"]
+
+    pre_raw = load_stories(0, n_pre)
+
+    train_raw = load_stories(
+        n_pre,
+        n_pre + n_train
+    )
+
+    test_raw = load_stories(
+        n_pre + n_train,
+        n_pre + n_train + n_test
+    )
+
+    pre_stories = plant_entities(
+        pre_raw,
+        all_names,
+        all_places,
+        seed=seed + 211
+    )
+
+    train_stories = plant_entities(
+        train_raw,
+        train_names,
+        train_places,
+        seed=seed + 223
+    )
+
+    test_stories = plant_entities(
+        test_raw,
+        heldout_names,
+        heldout_places,
+        seed=seed + 227
+    )
+
+    vocab = build_vocab(
+        pre_stories,
+        max_size=vocab_size
+    )
+
+    actual_vocab_size = len(vocab)
+
+    pre_enc = encode_stories(pre_stories, vocab)
+    train_enc = encode_stories(train_stories, vocab)
+    test_enc = encode_stories(test_stories, vocab)
+
+    seconds["data"] = time.perf_counter() - block_start
+
+    # =====================================================
+    # 2. INITIALIZE AND PRETRAIN ENCODER
+    # =====================================================
+
+    block_start = time.perf_counter()
+
+    params = init_params(
+        actual_vocab_size,
+        d_model=d_model,
+        n_layers=n_layers,
+        n_heads=n_heads,
+        max_len=max_len,
+        seed=seed + 307
+    )
+
+    history = pretrain(
+        params,
+        pre_enc,
+        steps=pretrain_steps,
+        batch=32,
+        lr=2e-3,
+        k=8,
+        rate=0.25,
+        warmup=100,
+        seed=seed + 401,
+        log_every=250
+    )
+
+    seconds["pretrain"] = time.perf_counter() - block_start
+
+    # =====================================================
+    # 3. MEASURE PRETRAINING
+    # =====================================================
+
+    block_start = time.perf_counter()
+
+    metrics = mlm_metrics(
+        params,
+        pre_enc,
+        n=512,
+        seed=seed + 503,
+        k=5,
+        rate=0.15
+    )
+
+    future = future_context_gain(
+        params,
+        pre_enc,
+        n=400,
+        seed=seed + 509
+    )
+
+    book_cloze = cloze_topk(
+        params,
+        vocab,
+        "Let's make [MASK] chicken! [SEP] It [MASK] great with orange sauce.",
+        topk=5
+    )
+
+    story_cloze = cloze_topk(
+        params,
+        vocab,
+        "the little girl went to the [MASK] to play with her [MASK] .",
+        topk=5
+    )
+
+    cloze = {
+        "book": book_cloze,
+        "story": story_cloze
+    }
+
+    neighbours = {}
+
+    for word in ("sad", "happy", "dog", "cake", "ran"):
+
+        if word in vocab:
+            neighbours[word] = nearest_words(
+                params,
+                vocab,
+                word,
+                k=6
+            )
+
+    seconds["measurements"] = time.perf_counter() - block_start
+
+    # =====================================================
+    # 4. ELMO-STYLE LAYER PROBES
+    # =====================================================
+
+    block_start = time.perf_counter()
+
+    probes = layer_probes(
+        params,
+        vocab,
+        train_stories,
+        test_stories,
+        seed=seed + 601,
+        steps=probe_steps
+    )
+
+    seconds["probes"] = time.perf_counter() - block_start
+
+    # =====================================================
+    # 5. SAVE ENCODER CHECKPOINTS
+    # =====================================================
+
+    weights = encoder_parameters(params)
+
+    pre_state = snapshot(weights)
+
+    rand_params = init_params(
+        actual_vocab_size,
+        d_model=d_model,
+        n_layers=n_layers,
+        n_heads=n_heads,
+        max_len=max_len,
+        seed=seed + 701
+    )
+
+    rand_state = snapshot(
+        encoder_parameters(rand_params)
+    )
+
+    # =====================================================
+    # 6. PRETRAINED NSP ZERO-SHOT EVALUATION
+    # =====================================================
+
+    zero_ids, zero_segs, zero_y = same_story_set(
+        test_enc,
+        n=512,
+        seed=seed + 809,
+        max_len=max_len,
+        min_gap=2
+    )
+
+    nsp_zero_shot = nsp_accuracy(
+        params,
+        zero_ids,
+        zero_segs,
+        zero_y
+    )
+
+    # =====================================================
+    # 7. CONFIGURE BUDGETS AND CONDITIONS
+    # =====================================================
+
+    effective_budgets = dict(DEFAULT_BUDGETS)
+
+    if budgets is not None:
+        effective_budgets.update(budgets)
+
+    effective_conditions = dict(DEFAULT_CONDITIONS)
+
+    if conditions is not None:
+        effective_conditions.update(conditions)
+
+    # IMPORTANT FIX:
+    # Only add tasks that actually have a non-empty budget.
+    # Empty tasks such as topic or same_story must not appear
+    # in the returned heads dictionary.
+
+    heads = {}
+
+    def maximum_budget(task):
+
+        values = effective_budgets.get(task, ())
+
+        return max(values) if values else 0
+
+    def evaluation_size(task):
+
+        return max(512, maximum_budget(task))
+
+    d = d_model
+
+    # =====================================================
+    # HELPER: RUN ONE HEAD
+    # =====================================================
+
+    def run_head(
+        task,
+        head_params,
+        head_state,
+        loss_fn,
+        arrays,
+        evaluate,
+        head_seed
+    ):
+
+        tuner = FineTuner(
+            params,
+            head_params,
+            loss_fn
+        )
+
+        return compare_conditions(
+            tuner=tuner,
+            weights=weights,
+            pre_state=pre_state,
+            rand_state=rand_state,
+            head_params=head_params,
+            head_state=head_state,
+            arrays=arrays,
+            budgets=effective_budgets.get(task, ()),
+            evaluate=evaluate,
+            conditions=effective_conditions.get(
+                task,
+                DEFAULT_CONDITIONS[task]
+            ),
+            steps=finetune_steps,
+            batch=32,
+            lr_enc=5e-4,
+            lr_head=1e-3,
+            seed=seed + head_seed
+        )
+
+    # =====================================================
+    # 8. TASK A — SENTENCE ENTITY-MENTION CLASSIFICATION
+    # =====================================================
+
+    block_start = time.perf_counter()
+
+    mention_n = maximum_budget("mention")
+
+    if mention_n > 0:
+
+        mention_train = mention_set(
+            train_stories,
+            mention_n,
+            vocab,
+            seed=seed + 1001,
+            max_len=max_len
+        )
+
+        mention_test = mention_set(
+            test_stories,
+            evaluation_size("mention"),
+            vocab,
+            seed=seed + 1002,
+            max_len=max_len
+        )
+
+        tr_ids, tr_segs, tr_y = mention_train
+        te_ids, te_segs, te_y = mention_test
+
+        if len(tr_ids) == 0 or len(te_ids) == 0:
+            raise ValueError("Mention classification data is empty.")
+
+        mention_head = MLPHead(
+            d,
+            4,
+            seed=seed + 1101
+        )
+
+        hp = mention_head.parameters()
+        hs = snapshot(hp)
+
+        mention_loss = lambda layers, y: (
+            mention_head(layers[-1][:, 0, :])
+            .sparse_categorical_crossentropy(y)
+        )
+
+        heads["mention"] = run_head(
+            "mention",
+            hp,
+            hs,
+            mention_loss,
+            (tr_ids, tr_segs, tr_y),
+            lambda: cls_accuracy(
+                params,
+                mention_head,
+                te_ids,
+                te_segs,
+                te_y
+            ),
+            head_seed=1201
+        )
+
+    seconds["mention"] = time.perf_counter() - block_start
+
+    # =====================================================
+    # 9. TASK A — TOPIC CLASSIFICATION
+    # =====================================================
+
+    block_start = time.perf_counter()
+
+    topic_n = maximum_budget("topic")
+
+    if topic_n > 0:
+
+        split = topic_split()
+
+        topic_train = topic_set(
+            train_stories,
+            split["train"],
+            topic_n,
+            vocab,
+            seed=seed + 1301,
+            max_len=max_len
+        )
+
+        topic_test = topic_set(
+            test_stories,
+            split["heldout"],
+            evaluation_size("topic"),
+            vocab,
+            seed=seed + 1302,
+            max_len=max_len
+        )
+
+        tr_ids, tr_segs, tr_y = topic_train
+        te_ids, te_segs, te_y = topic_test
+
+        if len(tr_ids) == 0 or len(te_ids) == 0:
+            raise ValueError("Topic classification data is empty.")
+
+        topic_head = MLPHead(
+            d,
+            3,
+            seed=seed + 1401
+        )
+
+        hp = topic_head.parameters()
+        hs = snapshot(hp)
+
+        topic_loss = lambda layers, y: (
+            topic_head(layers[-1][:, 0, :])
+            .sparse_categorical_crossentropy(y)
+        )
+
+        heads["topic"] = run_head(
+            "topic",
+            hp,
+            hs,
+            topic_loss,
+            (tr_ids, tr_segs, tr_y),
+            lambda: cls_accuracy(
+                params,
+                topic_head,
+                te_ids,
+                te_segs,
+                te_y
+            ),
+            head_seed=1501
+        )
+
+    seconds["topic"] = time.perf_counter() - block_start
+
+    # =====================================================
+    # 10. TASK B — BOTH SENTENCES NAME A PERSON
+    # =====================================================
+
+    block_start = time.perf_counter()
+
+    both_n = maximum_budget("both_person")
+
+    if both_n > 0:
+
+        both_train = both_person_set(
+            train_stories,
+            both_n,
+            vocab,
+            seed=seed + 1601,
+            max_len=max_len
+        )
+
+        both_test = both_person_set(
+            test_stories,
+            evaluation_size("both_person"),
+            vocab,
+            seed=seed + 1602,
+            max_len=max_len
+        )
+
+        tr_ids, tr_segs, tr_y = both_train
+        te_ids, te_segs, te_y = both_test
+
+        both_head = MLPHead(
+            d,
+            2,
+            seed=seed + 1701
+        )
+
+        hp = both_head.parameters()
+        hs = snapshot(hp)
+
+        both_loss = lambda layers, y: (
+            both_head(layers[-1][:, 0, :])
+            .sparse_categorical_crossentropy(y)
+        )
+
+        heads["both_person"] = run_head(
+            "both_person",
+            hp,
+            hs,
+            both_loss,
+            (tr_ids, tr_segs, tr_y),
+            lambda: cls_accuracy(
+                params,
+                both_head,
+                te_ids,
+                te_segs,
+                te_y
+            ),
+            head_seed=1801
+        )
+
+    seconds["both_person"] = time.perf_counter() - block_start
+
+    # =====================================================
+    # 11. TASK B — SAME-STORY CLASSIFICATION
+    # =====================================================
+
+    block_start = time.perf_counter()
+
+    same_n = maximum_budget("same_story")
+
+    if same_n > 0:
+
+        same_train = same_story_set(
+            train_enc,
+            same_n,
+            seed=seed + 1901,
+            max_len=max_len,
+            min_gap=2
+        )
+
+        tr_ids, tr_segs, tr_y = same_train
+
+        same_head = MLPHead(
+            d,
+            2,
+            seed=seed + 2001
+        )
+
+        hp = same_head.parameters()
+        hs = snapshot(hp)
+
+        same_loss = lambda layers, y: (
+            same_head(layers[-1][:, 0, :])
+            .sparse_categorical_crossentropy(y)
+        )
+
+        heads["same_story"] = run_head(
+            "same_story",
+            hp,
+            hs,
+            same_loss,
+            (tr_ids, tr_segs, tr_y),
+            lambda: cls_accuracy(
+                params,
+                same_head,
+                zero_ids,
+                zero_segs,
+                zero_y
+            ),
+            head_seed=2101
+        )
+
+    seconds["same_story"] = time.perf_counter() - block_start
+
+    # =====================================================
+    # 12. TASK C — BIO ENTITY TAGGING
+    # =====================================================
+
+    block_start = time.perf_counter()
+
+    tag_n = maximum_budget("tag")
+
+    book_sentence = []
+
+    if tag_n > 0:
+
+        tag_train = tag_set(
+            train_enc,
+            tag_n,
+            seed=seed + 2201,
+            max_len=max_len
+        )
+
+        tag_test = tag_set(
+            test_enc,
+            evaluation_size("tag"),
+            seed=seed + 2202,
+            max_len=max_len
+        )
+
+        tr_ids, tr_segs, tr_tags = tag_train
+        te_ids, te_segs, te_tags = tag_test
+
+        if len(tr_ids) == 0 or len(te_ids) == 0:
+            raise ValueError("Tagging dataset is empty.")
+
+        tag_head = MLPHead(
+            d,
+            5,
+            seed=seed + 2301
+        )
+
+        hp = tag_head.parameters()
+        hs = snapshot(hp)
+
+        tag_loss_fn = lambda layers, tags: tag_loss(
+            tag_head,
+            layers[-1],
+            tags
+        )
+
+        heads["tag"] = run_head(
+            "tag",
+            hp,
+            hs,
+            tag_loss_fn,
+            (tr_ids, tr_segs, tr_tags),
+            lambda: tag_f1(
+                params,
+                tag_head,
+                te_ids,
+                te_segs,
+                te_tags
+            ),
+            head_seed=2401
+        )
+
+        book_sentence = tag_text(
+            params,
+            tag_head,
+            vocab,
+            "mrs green spoke today in new york ."
+        )
+
+    seconds["tag"] = time.perf_counter() - block_start
+
+    # =====================================================
+    # 13. TASK D — QUESTION ANSWERING
+    # =====================================================
+
+    block_start = time.perf_counter()
+
+    qa_n = maximum_budget("qa")
+
+    if qa_n > 0:
+
+        qa_train_pool, qa_train_filler = qa_pools(
+            train_stories,
+            max_tok=12
+        )
+
+        qa_test_pool, qa_test_filler = qa_pools(
+            test_stories,
+            max_tok=12
+        )
+
+        qa_train = make_qa(
+            qa_train_pool,
+            qa_train_filler,
+            vocab,
+            qa_n,
+            seed=seed + 2501,
+            max_len=max_len
+        )
+
+        qa_test = make_qa(
+            qa_test_pool,
+            qa_test_filler,
+            vocab,
+            evaluation_size("qa"),
+            seed=seed + 2502,
+            max_len=max_len
+        )
+
+        tr_ids, tr_segs, tr_start, tr_end = qa_train
+        te_ids, te_segs, te_start, te_end = qa_test
+
+        tr_mask = passage_mask(tr_ids, tr_segs)
+        te_mask = passage_mask(te_ids, te_segs)
+
+        qa_head_s = MLPHead(
+            d,
+            1,
+            seed=seed + 2601
+        )
+
+        qa_head_e = MLPHead(
+            d,
+            1,
+            seed=seed + 2602
+        )
+
+        hp = (
+            qa_head_s.parameters()
+            + qa_head_e.parameters()
+        )
+
+        hs = snapshot(hp)
+
+        qa_loss_fn = lambda layers, start, end, mask: qa_loss(
+            qa_head_s,
+            qa_head_e,
+            layers[-1],
+            start,
+            end,
+            mask
+        )
+
+        qa_train_arrays = (
+            tr_ids,
+            tr_segs,
+            tr_start,
+            tr_end,
+            tr_mask.astype(np.bool_)
+        )
+
+        heads["qa"] = run_head(
+            "qa",
+            hp,
+            hs,
+            qa_loss_fn,
+            qa_train_arrays,
+            lambda: qa_accuracy(
+                params,
+                qa_head_s,
+                qa_head_e,
+                te_ids,
+                te_segs,
+                te_start,
+                te_end
+            ),
+            head_seed=2701
+        )
+
+    seconds["qa"] = time.perf_counter() - block_start
+
+    # =====================================================
+    # 14. RETURN COMPLETE EXPERIMENTAL REPORT
+    # =====================================================
+
+    return {
+        "vocab_size": actual_vocab_size,
+
+        "history": history,
+
+        "metrics": metrics,
+
+        "future": future,
+
+        "cloze": cloze,
+
+        "neighbours": neighbours,
+
+        "probes": probes,
+
+        "heads": heads,
+
+        "nsp_zero_shot": float(nsp_zero_shot),
+
+        "book_sentence": book_sentence,
+
+        "seconds": seconds
+    }
+

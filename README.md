@@ -39,6 +39,7 @@ python scaffold.py
 - [x] **27.** viterbi_bio
 - [x] **28.** make_qa
 - [x] **29.** best_span
+- [x] **30.** tiny_bert_report
 
 ---
 
